@@ -5,8 +5,14 @@ export const body = document.body;
 
 const colorPalette = {
   light:{
-    color:             "#000",
-    background:        "#fff",
+    color:             "#24251f",
+    background:        "#f5f3ec",
+    muted:             "#74766d",
+    surface:           "#ffffff",
+    line:              "#d8d9d1",
+    accent:            "#627d22",
+    accentSoft:        "#627d2218",
+    dangerSoft:        "#c84f4014",
     red:               "rgb(242, 55, 55)",
     green:             "rgb(57, 214, 39)",
     blue:              "rgb(5, 28, 141)",
@@ -14,8 +20,14 @@ const colorPalette = {
     lightgray:         "#e5e5e5",
   },
   dark:{
-    color:             "#fff",
-    background:        "#222",
+    color:             "#f4f2eb",
+    background:        "#11120f",
+    muted:             "#9d9b94",
+    surface:           "#1c1d1a",
+    line:              "#34352f",
+    accent:            "#c5e478",
+    accentSoft:        "#c5e47816",
+    dangerSoft:        "#e5837612",
     red:               "rgb(198, 20, 0)",
     blue:              "rgb(95, 100, 255)",
     green:             "rgb(0, 185, 19)",
@@ -26,7 +38,14 @@ const colorPalette = {
 
 export const color = {
   color: "var(--color)",
+  ink: "var(--color)",
   background: "var(--background)",
+  muted: "var(--muted)",
+  surface: "var(--surface)",
+  line: "var(--line)",
+  accent: "var(--accent)",
+  accentSoft: "var(--accent-soft)",
+  dangerSoft: "var(--danger-soft)",
   blue: "var(--blue)",
   red: "var(--red)",
   green: "var(--green)",
@@ -40,6 +59,12 @@ styl.innerHTML = `
 :root {
   --color: ${colorPalette.dark.color};
   --background: ${colorPalette.dark.background};
+  --muted: ${colorPalette.dark.muted};
+  --surface: ${colorPalette.dark.surface};
+  --line: ${colorPalette.dark.line};
+  --accent: ${colorPalette.dark.accent};
+  --accent-soft: ${colorPalette.dark.accentSoft};
+  --danger-soft: ${colorPalette.dark.dangerSoft};
   --red: ${colorPalette.dark.red};
   --green: ${colorPalette.dark.green};
   --blue: ${colorPalette.dark.blue};
@@ -53,6 +78,12 @@ styl.innerHTML = `
   :root {
     --color: ${colorPalette.light.color};
     --background: ${colorPalette.light.background};
+    --muted: ${colorPalette.light.muted};
+    --surface: ${colorPalette.light.surface};
+    --line: ${colorPalette.light.line};
+    --accent: ${colorPalette.light.accent};
+    --accent-soft: ${colorPalette.light.accentSoft};
+    --danger-soft: ${colorPalette.light.dangerSoft};
     --red: ${colorPalette.light.red};
     --green: ${colorPalette.light.green};
     --blue: ${colorPalette.light.blue};
@@ -125,7 +156,14 @@ export const html = (tag:string, ...cs:HTMLArg[]):HTMLElement=>{
       else if (arg.name == "onclick" || arg.length < 2) args.onclick = arg
       else console.warn("Function argument without name or with more than one parameter is ignored in html generator")
     }
-    else args = {...args, ...arg}
+    else {
+      const next = arg as Partial<Record<htmlKey, any>>
+      args = {
+        ...args,
+        ...next,
+        ...(next.style ? { style: { ...(args.style ?? {}), ...next.style } } : {}),
+      }
+    }
   }
   cs.forEach(add_arg)
   return htmlElement(tag, "", {...args, children})
@@ -262,5 +300,3 @@ export const fatButton = (text:string, onclick:()=>void):HTMLElement=>span(text,
     background: color.background,
   },
   onclick})
-
-

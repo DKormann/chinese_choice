@@ -16,7 +16,12 @@ describe("server functions", () => {
     expect(() => db.assertReferences(functions.requestNewChain.parameters, { user: missing })).toThrow()
 
     const result = await functions.requestNewChain.runner(db, { user })
-    expect(result.options).toHaveLength(3)
+    expect(result.options).toHaveLength(5)
+    expect(result.options.every(option => db.get("Symbol", option) !== null)).toBeTrue()
+
+    const next = await functions.tryOption.runner(db, { user, option: result.options[0]! })
+    expect(next.correct).toBeTrue()
+    if (next.correct) expect(next.next_options).toHaveLength(5)
     sqlite.close()
   })
 })
