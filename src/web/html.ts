@@ -142,6 +142,7 @@ export const h3:HTMLGenerator<HTMLHeadingElement> = newHtmlGenerator("h3")
 export const h4:HTMLGenerator<HTMLHeadingElement> = newHtmlGenerator("h4")
 
 export const div:HTMLGenerator<HTMLDivElement> = newHtmlGenerator("div")
+export const li:HTMLGenerator<HTMLLIElement> = newHtmlGenerator("li")
 export const pre:HTMLGenerator<HTMLPreElement> = newHtmlGenerator("pre")
 export const span:HTMLGenerator<HTMLSpanElement> = newHtmlGenerator("span")
 export const textarea:HTMLGenerator<HTMLTextAreaElement> = newHtmlGenerator("textarea")

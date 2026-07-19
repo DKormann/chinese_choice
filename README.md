@@ -7,8 +7,8 @@ A minimal full-stack Bun project extracted from ETINDI's infrastructure. It cont
 - Bun development and production servers
 - HTML and TypeScript browser entry point
 - Typed SQLite table definitions
-- Read-only JSON HTTP server for `list`, `get`, and `where`
-- Typed, schema-validated server functions for every database mutation
+- Read-only JSON HTTP server for `all`, `get`, and `where`
+- Schema-validated SQLite rows and foreign-key relationships
 - Cross-platform compiled release builds
 - SQL integration test
 
@@ -38,10 +38,4 @@ bun run build     # standalone executables in build/release
 1. Rename the project in `package.json` and `src/config.ts`.
 2. Define application tables in `src/tables.ts`.
 3. Build the interface in `src/web/main.ts` and `src/index.html`.
-4. Define mutations in `serverFunctions` in `src/tables.ts`. Each function's
-   parameter and result schemas become the typed `client.funcs.*` API; the
-   browser cannot directly write database rows.
-5. Add authentication and authorization checks inside server functions before
-   exposing private or user-specific data publicly.
-
-The sample `items` table is deliberately generic and starts empty.
+4. Declare indexes and foreign-key relationships in each table's options.

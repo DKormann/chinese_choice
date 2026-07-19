@@ -83,6 +83,9 @@ const validateByType = (schema: JSONSchema, value: unknown, path: string): void 
   switch (schema.type) {
     case "string":
       if (typeof value !== "string") fail(path, `expected string, got ${typeName(value)}`)
+      if (schema.format === "uuid" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value as string)) {
+        fail(path, "expected UUID")
+      }
       return
     case "number":
       if (typeof value !== "number" || Number.isNaN(value)) fail(path, `expected number, got ${typeName(value)}`)

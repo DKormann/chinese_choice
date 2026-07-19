@@ -1,11 +1,11 @@
 import type { TableRow } from "./sql"
-import { serverFunctions, tables, type ServerFunctions } from "./tables"
 import type { Infer } from "./schema"
+import { functions, tables, type ServerFunctions } from "./tables"
 import type { InferParameters } from "./typedFunction"
 
-type TableClient<T> = {
-  list(): Promise<T[]>
-  get(id: string): Promise<T | null>
+type TableClient<T extends { id: string }> = {
+  all(): Promise<T[]>
+  get(id: T["id"]): Promise<T | null>
   where<K extends keyof T>(column: K, value: T[K]): Promise<T[]>
 }
 
@@ -19,10 +19,10 @@ async function responseJson<T>(response: Response): Promise<T> {
 }
 
 export function createClient(baseUrl = "") {
-  function tableClient<T>(table: string): TableClient<T> {
+  function tableClient<T extends { id: string }>(table: string): TableClient<T> {
     const url = `${baseUrl}/api/db`
     return {
-      list: () => fetch(`${url}/list/${table}`).then(responseJson<T[]>),
+      all: () => fetch(`${url}/all/${table}`).then(responseJson<T[]>),
       get: id => fetch(`${url}/get/${table}/${encodeURIComponent(id)}`).then(responseJson<T | null>),
       where: (column, value) => fetch(`${url}/where/${table}`, {
         method: "POST",
@@ -32,7 +32,7 @@ export function createClient(baseUrl = "") {
     }
   }
 
-  const funcs = Object.fromEntries(Object.keys(serverFunctions).map(name => [name, async (args: unknown) => {
+  const funcs = Object.fromEntries(Object.keys(functions).map(name => [name, async (args: unknown) => {
     return fetch(`${baseUrl}/api/db/function/${name}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

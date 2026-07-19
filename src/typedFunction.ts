@@ -1,4 +1,4 @@
-import type { createDatabase } from "./sql"
+import type { createDB } from "./sql"
 import type { Infer, JsonData, Schema } from "./schema"
 import type { tables } from "./tables"
 
@@ -12,7 +12,7 @@ export type ServerFunction<P extends FunctionParameters, R extends JsonData> = {
   description: string
   parameters: P
   result: Schema<R>
-  runner: (db: ReturnType<typeof createDatabase<typeof tables>>, args: InferParameters<P>) => Promise<R> | R
+  runner: (db: ReturnType<typeof createDB<typeof tables>>, args: InferParameters<P>) => Promise<R> | R
 }
 
 export function serverFunction<const P extends FunctionParameters, R extends JsonData>(
