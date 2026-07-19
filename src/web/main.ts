@@ -221,6 +221,7 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
       span(String(index + 1), style({ position: "absolute", top: ".65rem", left: ".75rem", color: "#686a61", fontSize: ".7rem" })),
       span(symbol.mandarin_character, style({ fontFamily: "Songti SC, serif", fontSize: "3rem" })),
       span(symbol.pinyin || "…", style({ color: muted, fontSize: ".78rem" })),
+      span(symbol.meaning || "…", style({ color: muted, fontSize: ".72rem", lineHeight: "1.25", textAlign: "center" })),
       style({
         position: "relative", display: "grid", placeItems: "center", minHeight: "9rem", padding: "1rem",
         margin: "0", border: `1px solid ${line}`, borderRadius: "1rem", color: ink, background: surface,
@@ -246,9 +247,8 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
         }
         choiceButton.style.borderColor = accent
         choiceButton.style.background = color.accentSoft
-        status.textContent = "Nice. Keep going."
-        await new Promise(resolve => setTimeout(resolve, 420))
-        await renderLesson(user, { chain: result.next_chain, options: result.next_options })
+        status.textContent = "Correct. Loading choices…"
+        await renderLoadingOptions(user, result.next_chain)
       } catch (error) { showError(error) }
     }
     choicesRow.append(choiceButton)
@@ -272,6 +272,44 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
   if (annotationsPending) setTimeout(() => {
     if (lessonView === view) void renderLesson(user, state).catch(showError)
   }, 1500)
+}
+
+async function renderLoadingOptions(user: User, chainID: UUID): Promise<void> {
+  const view = ++lessonView
+  const chain = await readChain(chainID)
+  const currentChain = chain.at(-1)
+  if (!currentChain) throw new Error("Backend returned an empty chain")
+  const symbols = await Promise.all(chain.map(item => client.tables.Symbol.get(item.symbolID)))
+  if (symbols.some(symbol => !symbol)) throw new Error("Chain contains a missing symbol")
+
+  const sentence = div(style({
+    display: "flex", justifyContent: "center", margin: "2.2rem 0 4.8rem", color: ink,
+    fontFamily: "Songti SC, Noto Serif CJK SC, serif", fontSize: "clamp(4.5rem, 12vw, 9rem)", lineHeight: "1.05",
+  }))
+  symbols.forEach(symbol => sentence.append(character(symbol!.mandarin_character, symbol!.pinyin, symbol!.meaning)))
+  const placeholders = div(style({ display: "grid", gridTemplateColumns: "repeat(5, minmax(90px, 1fr))", gap: ".8rem", overflowX: "auto" }))
+  for (let index = 0; index < 5; index++) placeholders.append(div(
+    "…",
+    style({ display: "grid", placeItems: "center", minHeight: "9rem", border: `1px solid ${line}`, borderRadius: "1rem", color: muted, background: surface, fontSize: "2rem" }),
+  ))
+  const account = button(user.username, style({ padding: ".65rem 1rem", border: `1px solid ${line}`, borderRadius: "999px", color: muted, background: surface }))
+  account.onclick = renderProfiles
+  body.replaceChildren(div(
+    pageStyle,
+    div(style({ display: "flex", alignItems: "center", justifyContent: "space-between", width: "min(1120px, calc(100% - 3rem))", margin: "auto", padding: "2rem 0" }), brand(), account),
+    div(
+      style({ width: "min(1050px, calc(100% - 3rem))", margin: "7vh auto 0", textAlign: "center" }),
+      p("Continue the sentence", style({ margin: "0 0 2.8rem", color: accent, fontSize: ".75rem", fontWeight: "750", letterSpacing: ".18em", textTransform: "uppercase" })),
+      p(currentChain.completion === "complete" ? "Complete sentence" : "Incomplete prefix", style({ margin: "0 0 .7rem", color: muted, fontSize: ".72rem", letterSpacing: ".1em", textTransform: "uppercase" })),
+      p(currentChain.meaning, style({ margin: "0", color: ink, fontSize: "clamp(1rem, 2vw, 1.35rem)" })),
+      p(currentChain.pinyin, style({ margin: ".55rem 0 0", color: muted, fontSize: ".9rem", letterSpacing: ".08em" })),
+      sentence, placeholders,
+      p("Generating the next choices…", style({ margin: "1.5rem 0", color: muted, fontSize: ".85rem" })),
+    ),
+  ))
+
+  const next = await client.funcs.requestState({ user: user.id })
+  if (lessonView === view) await renderLesson(user, next)
 }
 
 async function openLesson(user: User): Promise<void> {

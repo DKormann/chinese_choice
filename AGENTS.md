@@ -86,10 +86,12 @@ The backend is authoritative for lesson state and choices. The frontend must use
 ### Learning model
 
 - `Symbol` stores one Chinese character with fixed global pinyin and meaning.
-- `Chain` rows form a tree through `prev`. Each row asynchronously receives the full pinyin and independent translation or description of only its root-to-node prefix.
-- Generate a complete Chinese sentence first, then enter its character path into the chain tree. Never ask that generation call for annotations.
-- Do not annotate sentence paths when inserting them. Lazily annotate only the current visible prefix and missing visible characters. Batch visible character annotations into one context-free background call; keep the current-prefix annotation separate and never reveal later continuation characters.
-- At a choice step, one correct option comes from the active complete sentence. Generate a second sentence with the same prefix and a different next character. Choose three random stored symbols and rate them concurrently; every fitting random symbol is correct and must receive a complete witness sentence/branch.
+- `Chain` rows are the complete global cache and tree through `prev`; do not duplicate edges or sentence membership in another table. A child is a valid continuation when its subtree contains an annotated `complete` node.
+- User lesson state is only the current chain. It does not retain or follow a source sentence.
+- Full-sentence generation returns the sentence, full pinyin, and translation. Insert its path and annotate its complete leaf immediately. Annotate intermediate visible prefixes independently without revealing later characters.
+- Batch missing visible character annotations into one context-free call.
+- Before returning a challenge, ensure all five option characters and both correct child chains are annotated. A correct click commits and returns the child chain immediately; the browser renders it before separately requesting the next five options.
+- At each step, aim for two valid sentence continuations, but do not require two distinct next characters. Generate only the missing number of fresh sentences once. If valid sentences collapse onto one child character, show one correct button and four random buttons; never retry to force linguistic diversity.
 - LLMs make linguistic content decisions. Do not include learner mistakes or pedagogy in generation prompts yet. OpenRouter calls must remain server-only.
 - Use the cheap default model for generation. Retry with the validator model only when output fails JSON/schema or lesson invariants; do not routinely pay for two calls.
 - Log LLM requests, raw responses, timings, validation failures, and retry attempts on the server. Never log API keys or authorization headers.

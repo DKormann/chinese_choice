@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { appName, dataDirectoryEnvironmentVariable } from "../config"
 import { createDB } from "../sql"
 import { object, validate } from "../schema"
-import { functions, resumeAnnotationJobs, tables } from "../tables"
+import { functions, tables } from "../tables"
 
 function defaultDataDirectory(): string {
   if (process.platform === "win32") return join(process.env.LOCALAPPDATA ?? homedir(), appName)
@@ -20,7 +20,6 @@ export const databasePath = join(dataDirectory, "app.db")
 export const sqlite = new Database(databasePath, { create: true })
 sqlite.exec("PRAGMA journal_mode = WAL")
 export const db = createDB(tables, sqlite)
-resumeAnnotationJobs(db)
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })

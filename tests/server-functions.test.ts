@@ -12,22 +12,23 @@ describe("server functions", () => {
     const missing = asUUID("00000000-0000-4000-8000-000000000002")
     db.set("User", { id: user, username: "test-user" })
 
-    db.assertReferences(functions.requestNewChain.parameters, { user })
-    expect(() => db.assertReferences(functions.requestNewChain.parameters, { user: missing })).toThrow()
+    db.assertReferences(functions.requestState.parameters, { user })
+    expect(() => db.assertReferences(functions.requestState.parameters, { user: missing })).toThrow()
 
     const chain = asUUID("10000000-0000-4000-8000-000000000001")
+    const child = asUUID("10000000-0000-4000-8000-000000000002")
     const symbols = [1, 2, 3, 4, 5].map(index => asUUID(`20000000-0000-4000-8000-${String(index).padStart(12, "0")}`))
     symbols.forEach((id, index) => db.set("Symbol", { id, mandarin_character: String(index), pinyin: `p${index}`, meaning: `m${index}` }))
     db.set("Chain", { id: chain, prev: null, symbolID: symbols[0]!, pinyin: "p", meaning: "translation", completion: "complete" })
-    db.set("UserState", { id: asUUID("30000000-0000-4000-8000-000000000001"), user, currentChain: chain, currentSentence: chain })
+    db.set("Chain", { id: child, prev: chain, symbolID: symbols[1]!, pinyin: "p1", meaning: "next translation", completion: "complete" })
+    db.set("UserState", { id: asUUID("30000000-0000-4000-8000-000000000001"), user, currentChain: chain })
     symbols.forEach((symbol, position) => db.set("UserStateOption", {
       id: asUUID(`40000000-0000-4000-8000-${String(position).padStart(12, "0")}`),
       user,
       symbol,
-      outcome: "wrong",
+      outcome: position === 1 ? "correct" : "wrong",
       position,
-      nextChain: null,
-      sentenceLeaf: null,
+      nextChain: position === 1 ? child : null,
     }))
 
     const result = await functions.requestState.runner(db, { user })
@@ -38,6 +39,11 @@ describe("server functions", () => {
     expect(db.where("Attempt", "user", user)).toHaveLength(1)
     expect(db.where("UserStateOption", "user", user)).toHaveLength(5)
     expect(db.forceGet("UserState", db.all("UserState")[0]!.id).currentChain).toBe(chain)
+
+    const correct = await functions.tryOption.runner(db, { user, option: symbols[1]! })
+    expect(correct).toEqual({ correct: true, outcome: "correct", next_chain: child })
+    expect(db.where("UserStateOption", "user", user)).toHaveLength(0)
+    expect(db.forceGet("UserState", db.all("UserState")[0]!.id).currentChain).toBe(child)
     sqlite.close()
   })
 })

@@ -1,4 +1,4 @@
-import { OpenRouterContentError, OpenRouterRequestError, openRouterJson } from "./backend/openrouter"
+import { OpenRouterContentError, openRouterJson } from "./backend/openrouter"
 import { createDB, randomUUID, ref, selfRef, table, UUID } from "./sql"
 import { array, number, object, string, type Infer } from "./schema"
 import { serverFunction, type ServerFunction } from "./typedFunction"
@@ -9,7 +9,6 @@ export const Symbol = table({
   meaning: string,
 })
 
-// pinyin and meaning describe only this complete root-to-node prefix.
 export const Chain = table({
   prev: selfRef({ nullable: true, onDelete: "set null" }),
   symbolID: ref(Symbol, { onDelete: "cascade" }),
@@ -30,7 +29,6 @@ export const Knowledge = table({
 export const UserState = table({
   user: ref(User, { onDelete: "cascade" }),
   currentChain: ref(Chain, { nullable: true, onDelete: "set null" }),
-  currentSentence: ref(Chain, { nullable: true, onDelete: "set null" }),
 }, { access: "private", indexes: ["user"] })
 
 export const UserStateOption = table({
@@ -39,7 +37,6 @@ export const UserStateOption = table({
   outcome: string,
   position: number,
   nextChain: ref(Chain, { nullable: true, onDelete: "cascade" }),
-  sentenceLeaf: ref(Chain, { nullable: true, onDelete: "cascade" }),
 }, { access: "private", indexes: ["user", "symbol"] })
 
 export const Attempt = table({
@@ -50,49 +47,35 @@ export const Attempt = table({
   createdAt: number,
 }, { access: "private", indexes: ["user", "chain", "symbol"] })
 
-// status: 0 pending, 1 processing, 2 failed. Successful jobs are removed.
-export const AnnotationJob = table({
-  kind: string,
-  symbol: ref(Symbol, { nullable: true, onDelete: "cascade" }),
-  chain: ref(Chain, { nullable: true, onDelete: "cascade" }),
-  status: number,
-  attempts: number,
-}, { access: "private", indexes: ["status", "symbol", "chain"] })
-
-export const tables = { User, Symbol, Chain, Knowledge, UserState, UserStateOption, Attempt, AnnotationJob }
+export const tables = { User, Symbol, Chain, Knowledge, UserState, UserStateOption, Attempt }
+export type AppTables = typeof tables
 
 export const SymbolRow = object(Symbol.columns)
 export const ChainRow = object(Chain.columns)
 export const KnowledgeRow = object(Knowledge.columns)
 export const UserRow = object(User.columns)
-export type AppTables = typeof tables
+type ChainData = Infer<typeof ChainRow>
 
 export type FUNCS = {
-  requestNewChain: (user: UUID) => { chain: UUID; options: UUID[] }
   requestState: (user: UUID) => { chain: UUID; options: UUID[] }
   tryOption: (user: UUID, option: UUID) => {
     correct: true
     outcome: "correct"
     next_chain: UUID
-    next_options: UUID[]
   } | { correct: false; outcome: "possible" | "wrong" }
 }
 
 type FunctionImplementations = { [K in keyof FUNCS]: ServerFunction<any, ReturnType<FUNCS[K]>> }
 type DB = ReturnType<typeof createDB<typeof tables>>
+type Outcome = "correct" | "possible" | "wrong"
 
-const sentenceResponse = object({ sentence: string })
-const ratingResponse = object({
-  ratings: array(object({
-    character: string,
-    outcome: string,
-  })),
-})
+const sentenceResponse = object({ sentence: string, pinyin: string, translation: string })
+const ratingResponse = object({ ratings: array(object({ character: string, outcome: string })) })
 const symbolAnnotations = object({
   annotations: array(object({ character: string, pinyin: string, fixed_translation: string })),
 })
 const chainAnnotation = object({ pinyin: string, completion: string, translation_or_description: string })
-type Ratings = Infer<typeof ratingResponse>
+type GeneratedSentence = Infer<typeof sentenceResponse>
 
 function characters(value: string): string[] {
   return Array.from(value.trim())
@@ -107,73 +90,46 @@ function isChineseSentence(value: string): boolean {
   return chars.length >= 4 && chars.length <= 24 && chars.every(char => /^\p{Script=Han}$/u.test(char))
 }
 
-function chainText(db: DB, id: UUID): string {
-  const result: string[] = []
+function chainRows(db: DB, id: UUID): ChainData[] {
+  const rows: ChainData[] = []
   let current: UUID | null = id
   while (current) {
-    const node: { prev: UUID | null; symbolID: UUID } = db.forceGet("Chain", current)
-    result.unshift(db.forceGet("Symbol", node.symbolID).mandarin_character)
-    current = node.prev
+    const row: ChainData = db.forceGet("Chain", current)
+    rows.unshift(row)
+    current = row.prev
   }
-  return result.join("")
+  return rows
 }
 
-function validatorModel(): string {
-  return process.env.OPENROUTER_VALIDATOR_MODEL ?? "z-ai/glm-5"
+function chainText(db: DB, id: UUID): string {
+  return chainRows(db, id).map(row => db.forceGet("Symbol", row.symbolID).mandarin_character).join("")
 }
 
-async function generateSentence(prefix = "", excludedNext: string[] = []): Promise<string> {
+async function generateSentence(prefix = ""): Promise<GeneratedSentence> {
   const messages = [{
     role: "user" as const,
     content: prefix
-      ? `Write one natural, ordinary Chinese sentence of 6 to 16 Chinese characters beginning exactly with ${JSON.stringify(prefix)}. Its next character after that prefix must not be any of: ${excludedNext.join(", ")}. Return only the required JSON field.`
-      : "Write one natural, ordinary beginner-friendly Chinese sentence of 8 to 16 Chinese characters. Use only Chinese characters, with no punctuation. Return only the required JSON field.",
+      ? `Write one natural, ordinary Chinese sentence of 6 to 16 Chinese characters beginning exactly with ${JSON.stringify(prefix)}. You know only this prefix; choose any natural continuation. Also return the full sentence pinyin and English translation.`
+      : "Write one natural, ordinary beginner-friendly Chinese sentence of 8 to 16 Chinese characters. Use only Chinese characters, with no punctuation. Also return the full sentence pinyin and English translation.",
   }]
   const valid = (sentence: string) => isChineseSentence(sentence)
     && sentence.startsWith(prefix)
     && characters(sentence).length > characters(prefix).length
-    && !excludedNext.includes(characters(sentence)[characters(prefix).length] ?? "")
 
   try {
     const result = await openRouterJson(sentenceResponse, messages)
     const sentence = normalizeSentence(result.sentence)
     if (!valid(sentence)) throw new OpenRouterContentError(`Invalid generated sentence: ${result.sentence}`)
-    return sentence
+    return { ...result, sentence }
   } catch (error) {
     if (!(error instanceof OpenRouterContentError)) throw error
-    console.log(JSON.stringify({ scope: "llm", event: "retry", task: "sentence", model: validatorModel(), reason: error.message }))
-    const result = await openRouterJson(sentenceResponse, messages, validatorModel())
+    const model = process.env.OPENROUTER_VALIDATOR_MODEL ?? "z-ai/glm-5"
+    console.log(JSON.stringify({ scope: "llm", event: "retry", task: "sentence", model, reason: error.message }))
+    const result = await openRouterJson(sentenceResponse, messages, model)
     const sentence = normalizeSentence(result.sentence)
     if (!valid(sentence)) throw new Error(`Validator returned invalid sentence: ${result.sentence}`)
-    return sentence
+    return { ...result, sentence }
   }
-}
-
-async function rateCandidates(prefix: string, candidates: string[]): Promise<Ratings> {
-  const messages = [{
-    role: "user" as const,
-    content: `For each candidate, decide whether it could technically be the next character after ${JSON.stringify(prefix)} in some natural ordinary Chinese sentence. Candidates: ${candidates.join(", ")}. Return outcome "possible" when it could fit and "wrong" when it could not. Return every candidate exactly once. Do not generate example sentences. Do not consider pedagogy or learner history.`,
-  }]
-  const result = await openRouterJson(ratingResponse, messages)
-  const ratings = candidates.map(character => {
-    const proposed = result.ratings.find(rating => rating.character === character)
-    return { character, outcome: proposed?.outcome === "possible" ? "possible" : "wrong" }
-  })
-  return { ratings }
-}
-
-function enqueueSymbol(db: DB, symbol: UUID): void {
-  const row = db.forceGet("Symbol", symbol)
-  if (row.pinyin && row.meaning) return
-  if (db.where("AnnotationJob", "symbol", symbol).some(job => job.kind === "symbol" && job.status !== 2)) return
-  db.insert("AnnotationJob", { id: randomUUID(), kind: "symbol", symbol, chain: null, status: 0, attempts: 0 })
-}
-
-function enqueueChain(db: DB, chain: UUID): void {
-  const row = db.forceGet("Chain", chain)
-  if (row.pinyin && row.meaning) return
-  if (db.where("AnnotationJob", "chain", chain).some(job => job.kind === "chain" && job.status !== 2)) return
-  db.insert("AnnotationJob", { id: randomUUID(), kind: "chain", symbol: null, chain, status: 0, attempts: 0 })
 }
 
 function findOrCreateSymbol(db: DB, character: string): UUID {
@@ -184,12 +140,12 @@ function findOrCreateSymbol(db: DB, character: string): UUID {
   return id
 }
 
-function appendSentence(db: DB, sentence: string, prefixChain: UUID | null = null): { first: UUID; leaf: UUID } {
+function appendSentence(db: DB, generated: GeneratedSentence, prefixChain: UUID | null = null): { first: UUID; leaf: UUID } {
   const prefix = prefixChain ? chainText(db, prefixChain) : ""
-  if (!sentence.startsWith(prefix) || sentence === prefix) throw new Error(`Sentence does not extend prefix ${prefix}`)
+  if (!generated.sentence.startsWith(prefix) || generated.sentence === prefix) throw new Error(`Sentence does not extend prefix ${prefix}`)
   let previous = prefixChain
   let first: UUID | null = null
-  for (const character of characters(sentence).slice(characters(prefix).length)) {
+  for (const character of characters(generated.sentence).slice(characters(prefix).length)) {
     const symbolID = findOrCreateSymbol(db, character)
     const existing = db.where("Chain", "prev", previous).find(row => row.symbolID === symbolID)
     const id = existing?.id ?? randomUUID()
@@ -198,18 +154,77 @@ function appendSentence(db: DB, sentence: string, prefixChain: UUID | null = nul
     previous = id
   }
   if (!first || !previous) throw new Error("Sentence produced no chain nodes")
+  const leaf = db.forceGet("Chain", previous)
+  db.set("Chain", { ...leaf, pinyin: generated.pinyin, meaning: generated.translation, completion: "complete" })
   return { first, leaf: previous }
 }
 
-function nextOnSentence(db: DB, chain: UUID, leaf: UUID): UUID | null {
-  let current: UUID | null = leaf
-  while (current) {
-    const node: { prev: UUID | null } | null = db.get("Chain", current)
-    if (!node) return null
-    if (node.prev === chain) return current
-    current = node.prev
+function hasCompleteDescendant(db: DB, chain: UUID): boolean {
+  const queue = [chain]
+  const visited = new Set<UUID>()
+  while (queue.length) {
+    const current = queue.shift()!
+    if (visited.has(current)) continue
+    visited.add(current)
+    const row = db.forceGet("Chain", current)
+    if (row.completion === "complete" && row.pinyin && row.meaning) return true
+    queue.push(...db.where("Chain", "prev", current).map(child => child.id))
   }
-  return null
+  return false
+}
+
+function validChildren(db: DB, chain: UUID) {
+  return db.where("Chain", "prev", chain).filter(child => hasCompleteDescendant(db, child.id))
+}
+
+async function ensureValidChildren(db: DB, chain: UUID) {
+  let children = validChildren(db, chain)
+  const sentencesToGenerate = Math.max(0, 2 - children.length)
+  for (let attempt = 0; attempt < sentencesToGenerate; attempt++) {
+    appendSentence(db, await generateSentence(chainText(db, chain)), chain)
+  }
+  children = validChildren(db, chain)
+  if (!children.length) throw new Error("Could not generate a valid continuation")
+  return children.slice(0, 2)
+}
+
+async function rateCandidates(prefix: string, candidates: string[]): Promise<{ character: string; outcome: "possible" | "wrong" }[]> {
+  const result = await openRouterJson(ratingResponse, [{
+    role: "user",
+    content: `For each candidate, decide whether it could technically be the next character after ${JSON.stringify(prefix)} in some natural ordinary Chinese sentence. Candidates: ${candidates.join(", ")}. Return outcome "possible" when it could fit and "wrong" when it could not. Return every candidate exactly once. Do not generate example sentences. Do not consider pedagogy or learner history.`,
+  }])
+  return candidates.map(character => ({
+    character,
+    outcome: result.ratings.find(rating => rating.character === character)?.outcome === "possible" ? "possible" : "wrong",
+  }))
+}
+
+async function annotateSymbols(db: DB, ids: UUID[]): Promise<void> {
+  const symbols = [...new Set(ids)].map(id => db.forceGet("Symbol", id)).filter(symbol => !symbol.pinyin || !symbol.meaning)
+  if (!symbols.length) return
+  const result = await openRouterJson(symbolAnnotations, [{
+    role: "user",
+    content: `Annotate these Chinese characters independently: ${symbols.map(symbol => symbol.mandarin_character).join(", ")}. For each, return the character, standard pinyin, and one short fixed English translation. Do not use sentence context. Return every character exactly once.`,
+  }])
+  for (const symbol of symbols) {
+    const annotation = result.annotations.find(item => item.character === symbol.mandarin_character)
+    if (!annotation) throw new OpenRouterContentError(`Missing annotation for ${symbol.mandarin_character}`)
+    db.set("Symbol", { ...symbol, pinyin: annotation.pinyin, meaning: annotation.fixed_translation })
+  }
+}
+
+async function annotateChain(db: DB, id: UUID): Promise<void> {
+  const chain = db.forceGet("Chain", id)
+  if (chain.pinyin && chain.meaning && chain.completion !== "unknown") return
+  const text = chainText(db, id)
+  const result = await openRouterJson(chainAnnotation, [{
+    role: "user",
+    content: `Annotate only this Chinese text, without imagining any later continuation: ${JSON.stringify(text)}. Give its complete pinyin. Set completion to "complete" if it can stand naturally as a complete utterance, otherwise "incomplete". For incomplete text, translate it with an ellipsis or provide a literal description that clearly feels unfinished.`,
+  }])
+  if (result.completion !== "complete" && result.completion !== "incomplete") {
+    throw new OpenRouterContentError(`Invalid chain completion: ${result.completion}`)
+  }
+  db.set("Chain", { ...chain, pinyin: result.pinyin, meaning: result.translation_or_description, completion: result.completion })
 }
 
 function sampleSymbols(db: DB, excluded: Set<UUID>, count: number): UUID[] {
@@ -226,165 +241,61 @@ type OptionRow = {
   id: UUID
   user: UUID
   symbol: UUID
-  outcome: "correct" | "possible" | "wrong"
+  outcome: Outcome
   position: number
   nextChain: UUID | null
-  sentenceLeaf: UUID | null
 }
 
-async function createOptions(db: DB, user: UUID, chain: UUID, sentenceLeaf: UUID): Promise<UUID[]> {
-  let knownNext = nextOnSentence(db, chain, sentenceLeaf)
-  if (!knownNext) {
-    const extension = appendSentence(db, await generateSentence(chainText(db, chain)), chain)
-    knownNext = extension.first
-    sentenceLeaf = extension.leaf
-  }
-  const knownSymbol = db.forceGet("Chain", knownNext).symbolID
-  const randomSymbols = sampleSymbols(db, new Set([knownSymbol]), 3)
-  const randomCharacters = randomSymbols.map(id => db.forceGet("Symbol", id).mandarin_character)
-  const prefix = chainText(db, chain)
-  const knownCharacter = db.forceGet("Symbol", knownSymbol).mandarin_character
-
-  const [alternateSentence, ratings] = await Promise.all([
-    generateSentence(prefix, [knownCharacter, ...randomCharacters]),
-    rateCandidates(prefix, randomCharacters),
-  ])
-  const alternate = appendSentence(db, alternateSentence, chain)
-  const alternateSymbol = db.forceGet("Chain", alternate.first).symbolID
-
+async function createOptions(db: DB, user: UUID, chain: UUID): Promise<UUID[]> {
+  const children = await ensureValidChildren(db, chain)
+  const correct = children.map(child => ({ symbol: child.symbolID, outcome: "correct" as const, nextChain: child.id }))
+  const randomSymbols = sampleSymbols(db, new Set(correct.map(option => option.symbol)), 5 - correct.length)
+  const ratings = await rateCandidates(chainText(db, chain), randomSymbols.map(id => db.forceGet("Symbol", id).mandarin_character))
   const rows: Omit<OptionRow, "id" | "user" | "position">[] = [
-    { symbol: knownSymbol, outcome: "correct", nextChain: knownNext, sentenceLeaf },
-    { symbol: alternateSymbol, outcome: "correct", nextChain: alternate.first, sentenceLeaf: alternate.leaf },
-    ...ratings.ratings.map(rating => {
-      const symbol = db.where("Symbol", "mandarin_character", rating.character)[0]
-      if (!symbol) throw new Error(`Rated symbol is missing: ${rating.character}`)
-      const outcome = rating.outcome === "possible" ? "possible" as const : "wrong" as const
-      return { symbol: symbol.id, outcome, nextChain: null, sentenceLeaf: null }
-    }),
+    ...correct,
+    ...ratings.map(rating => ({
+      symbol: db.where("Symbol", "mandarin_character", rating.character)[0]!.id,
+      outcome: rating.outcome,
+      nextChain: null,
+    })),
   ]
   for (let index = rows.length - 1; index > 0; index--) {
     const other = Math.floor(Math.random() * (index + 1))
     ;[rows[index], rows[other]] = [rows[other]!, rows[index]!]
   }
+
+  await Promise.all([
+    annotateSymbols(db, rows.map(row => row.symbol)),
+    annotateChain(db, chain),
+    ...children.map(child => annotateChain(db, child.id)),
+  ])
+
   const stored: OptionRow[] = rows.map((row, position) => ({ id: randomUUID(), user, position, ...row }))
   db.transaction(() => {
     for (const old of db.where("UserStateOption", "user", user)) db.delete("UserStateOption", old.id)
     for (const row of stored) db.insert("UserStateOption", row)
   })
-  enqueueVisibleAnnotations(db, chain, stored.map(row => row.symbol))
-  kickAnnotationWorker(db)
   return stored.map(row => row.symbol)
 }
 
-let annotationWorker: Promise<void> | null = null
-
-function enqueueVisibleAnnotations(db: DB, chain: UUID, options: UUID[]): void {
-  enqueueChain(db, chain)
-  let current: UUID | null = chain
-  while (current) {
-    const node: { prev: UUID | null; symbolID: UUID } = db.forceGet("Chain", current)
-    enqueueSymbol(db, node.symbolID)
-    current = node.prev
-  }
-  for (const symbol of options) enqueueSymbol(db, symbol)
+function activeChain(db: DB, user: UUID): UUID | null {
+  const chain = db.where("UserState", "user", user)[0]?.currentChain
+  return chain && db.get("Chain", chain) ? chain : null
 }
 
-export function kickAnnotationWorker(db: DB): void {
-  if (annotationWorker) return
-  annotationWorker = processAnnotationJobs(db).finally(() => { annotationWorker = null })
-}
-
-async function processAnnotationJobs(db: DB): Promise<void> {
-  let processed = 0
-  while (true) {
-    const pending = db.where("AnnotationJob", "status", 0)
-    const job = pending[0]
-    if (!job) {
-      if (processed > 0) console.log(JSON.stringify({ scope: "llm", event: "annotation_queue_complete", processed }))
-      return
-    }
-    const jobs = job.kind === "symbol" ? pending.filter(item => item.kind === "symbol").slice(0, 20) : [job]
-    console.log(JSON.stringify({ scope: "llm", event: "annotation_batch", kind: job.kind, count: jobs.length, remaining: pending.length }))
-    for (const current of jobs) db.set("AnnotationJob", { ...current, status: 1, attempts: current.attempts + 1 })
-    try {
-      if (job.kind === "symbol") {
-        const symbols = jobs.map(current => {
-          if (!current.symbol) throw new Error(`Invalid symbol annotation job ${current.id}`)
-          return db.forceGet("Symbol", current.symbol)
-        })
-        const result = await openRouterJson(symbolAnnotations, [{
-          role: "user",
-          content: `Annotate these Chinese characters independently: ${symbols.map(symbol => symbol.mandarin_character).join(", ")}. For each, return the character, standard pinyin, and one short fixed English translation. Do not use sentence context. Return every character exactly once.`,
-        }])
-        if (result.annotations.length !== symbols.length || new Set(result.annotations.map(item => item.character)).size !== symbols.length) {
-          throw new OpenRouterContentError("Symbol annotation batch is incomplete or duplicated")
-        }
-        for (const symbol of symbols) {
-          const annotation = result.annotations.find(item => item.character === symbol.mandarin_character)
-          if (!annotation) throw new OpenRouterContentError(`Missing annotation for ${symbol.mandarin_character}`)
-          db.set("Symbol", { ...symbol, pinyin: annotation.pinyin, meaning: annotation.fixed_translation })
-        }
-      } else if (job.kind === "chain" && job.chain) {
-        const chain = db.forceGet("Chain", job.chain)
-        const prefix = chainText(db, job.chain)
-        const annotation = await openRouterJson(chainAnnotation, [{
-          role: "user",
-          content: `Annotate only this Chinese text, without imagining any later continuation: ${JSON.stringify(prefix)}. Give its complete pinyin. Set completion to "complete" if it can stand naturally as a complete utterance, otherwise "incomplete". For incomplete text, translate it with an ellipsis or provide a literal description that clearly feels unfinished.`,
-        }])
-        if (annotation.completion !== "complete" && annotation.completion !== "incomplete") {
-          throw new OpenRouterContentError(`Invalid chain completion: ${annotation.completion}`)
-        }
-        db.set("Chain", { ...chain, pinyin: annotation.pinyin, meaning: annotation.translation_or_description, completion: annotation.completion })
-      } else {
-        throw new Error(`Invalid annotation job ${job.id}`)
-      }
-      for (const current of jobs) db.delete("AnnotationJob", current.id)
-      processed += jobs.length
-    } catch (error) {
-      const attempts = Math.max(...jobs.map(current => current.attempts + 1))
-      const retryable = error instanceof OpenRouterContentError
-        || (error instanceof OpenRouterRequestError && error.retryable)
-      console.error(JSON.stringify({ scope: "llm", event: "annotation_error", kind: job.kind, count: jobs.length, attempts, retryable, error: error instanceof Error ? error.message : String(error) }))
-      for (const current of jobs) db.set("AnnotationJob", { ...current, status: retryable && attempts < 3 ? 0 : 2, attempts: current.attempts + 1 })
-    }
-  }
-}
-
-export function resumeAnnotationJobs(db: DB): void {
-  for (const job of db.all("AnnotationJob")) db.delete("AnnotationJob", job.id)
-  for (const state of db.all("UserState")) {
-    if (!state.currentChain) continue
-    const options = db.where("UserStateOption", "user", state.user).map(option => option.symbol)
-    if (options.length === 5) enqueueVisibleAnnotations(db, state.currentChain, options)
-  }
-  kickAnnotationWorker(db)
-}
-
-function stateFor(db: DB, user: UUID): { chain: UUID; sentenceLeaf: UUID; options: UUID[] } | null {
-  const state = db.where("UserState", "user", user)[0]
-  if (!state?.currentChain || !state.currentSentence) return null
-  if (!db.get("Chain", state.currentChain)) return null
-  const sentenceLeaf = db.get("Chain", state.currentSentence)?.id ?? state.currentChain
-  const current = db.forceGet("Chain", state.currentChain)
-  if (current.prev === null) {
-    const latest = db.where("Attempt", "user", user)
-      .filter(attempt => attempt.outcome === "correct" && attempt.symbol === current.symbolID && attempt.chain !== current.id)
-      .sort((a, b) => b.createdAt - a.createdAt)[0]
-    if (latest) {
-      db.set("Chain", { ...current, prev: latest.chain })
-      console.log(JSON.stringify({ scope: "lesson", event: "repaired_chain_parent", chain: current.id, parent: latest.chain }))
-    }
-  }
+function currentState(db: DB, user: UUID): { chain: UUID; options: UUID[] } | null {
+  const chain = activeChain(db, user)
+  if (!chain) return null
   const options = db.where("UserStateOption", "user", user).sort((a, b) => a.position - b.position)
-  return options.length === 5 ? { chain: state.currentChain, sentenceLeaf, options: options.map(option => option.symbol) } : null
+  return options.length === 5 ? { chain, options: options.map(option => option.symbol) } : null
 }
 
-function setState(db: DB, user: UUID, chain: UUID, sentenceLeaf: UUID): void {
+function setState(db: DB, user: UUID, chain: UUID): void {
   const existing = db.where("UserState", "user", user)[0]
-  db.set("UserState", { id: existing?.id ?? randomUUID(), user, currentChain: chain, currentSentence: sentenceLeaf })
+  db.set("UserState", { id: existing?.id ?? randomUUID(), user, currentChain: chain })
 }
 
-function recordAttempt(db: DB, user: UUID, chain: UUID, symbol: UUID, outcome: "correct" | "possible" | "wrong"): void {
+function recordAttempt(db: DB, user: UUID, chain: UUID, symbol: UUID, outcome: Outcome): void {
   db.insert("Attempt", { id: randomUUID(), user, chain, symbol, outcome, createdAt: Date.now() })
   if (outcome === "possible") return
   const knowledge = db.where("Knowledge", "user", user).find(row => row.symbolID === symbol)
@@ -396,11 +307,10 @@ function recordAttempt(db: DB, user: UUID, chain: UUID, symbol: UUID, outcome: "
 }
 
 async function newLesson(db: DB, user: UUID): Promise<{ chain: UUID; options: UUID[] }> {
-  const sentence = await generateSentence()
-  const built = appendSentence(db, sentence)
-  const options = await createOptions(db, user, built.first, built.leaf)
-  setState(db, user, built.first, built.leaf)
-  return { chain: built.first, options }
+  const sentence = appendSentence(db, await generateSentence())
+  const options = await createOptions(db, user, sentence.first)
+  setState(db, user, sentence.first)
+  return { chain: sentence.first, options }
 }
 
 export const functions = {
@@ -410,55 +320,34 @@ export const functions = {
     return row
   }),
 
-  requestNewChain: serverFunction(
-    { user: ref(User) },
-    async (db, { user }): Promise<ReturnType<FUNCS["requestNewChain"]>> => newLesson(db, user),
-    "Generate a complete sentence, enter its chain, and return five private options.",
-  ),
-
   requestState: serverFunction(
     { user: ref(User) },
     async (db, { user }): Promise<ReturnType<FUNCS["requestState"]>> => {
-      const existing = stateFor(db, user)
-      if (!existing) return newLesson(db, user)
-      enqueueVisibleAnnotations(db, existing.chain, existing.options)
-      kickAnnotationWorker(db)
-      return { chain: existing.chain, options: existing.options }
+      const existing = currentState(db, user)
+      if (existing) return existing
+      const chain = activeChain(db, user)
+      if (!chain) return newLesson(db, user)
+      return { chain, options: await createOptions(db, user, chain) }
     },
-    "Return persistent private options or begin a sentence-backed lesson.",
+    "Return the current prefix and its five options.",
   ),
 
   tryOption: serverFunction(
     { user: ref(User), option: ref(Symbol) },
     async (db, { user, option }): Promise<ReturnType<FUNCS["tryOption"]>> => {
-      const state = stateFor(db, user)
-      if (!state) throw new Error("User has no active lesson state")
+      const state = currentState(db, user)
+      if (!state) throw new Error("User has no active options")
       const selected = db.where("UserStateOption", "user", user).find(row => row.symbol === option)
-      if (!selected) throw new Error("Option is not part of the active lesson")
-      if (selected.outcome !== "correct" && selected.outcome !== "possible" && selected.outcome !== "wrong") {
-        throw new Error(`Invalid option outcome: ${selected.outcome}`)
-      }
-      recordAttempt(db, user, state.chain, option, selected.outcome)
-      if (selected.outcome !== "correct") return { correct: false, outcome: selected.outcome }
-      let nextChain = selected.nextChain ? db.get("Chain", selected.nextChain) : null
-      let sentenceLeaf = selected.sentenceLeaf && db.get("Chain", selected.sentenceLeaf) ? selected.sentenceLeaf : null
-      if (!nextChain) {
-        const selectedCharacter = db.forceGet("Symbol", option).mandarin_character
-        const rebuilt = appendSentence(db, await generateSentence(chainText(db, state.chain) + selectedCharacter), state.chain)
-        nextChain = db.forceGet("Chain", rebuilt.first)
-        sentenceLeaf = rebuilt.leaf
-        console.log(JSON.stringify({ scope: "lesson", event: "rebuilt_missing_branch", chain: nextChain.id }))
-      }
-      if (nextChain.prev !== state.chain) {
-        db.set("Chain", { ...nextChain, prev: state.chain })
-        console.log(JSON.stringify({ scope: "lesson", event: "repaired_chain_parent", chain: nextChain.id, parent: state.chain }))
-      }
-      sentenceLeaf ??= nextChain.id
-      const nextOptions = await createOptions(db, user, nextChain.id, sentenceLeaf)
-      setState(db, user, nextChain.id, sentenceLeaf)
-      return { correct: true, outcome: "correct", next_chain: nextChain.id, next_options: nextOptions }
+      if (!selected || !["correct", "possible", "wrong"].includes(selected.outcome)) throw new Error("Invalid active option")
+      const outcome = selected.outcome as Outcome
+      recordAttempt(db, user, state.chain, option, outcome)
+      if (outcome !== "correct") return { correct: false, outcome }
+      if (!selected.nextChain) throw new Error("Correct option has no child chain")
+      setState(db, user, selected.nextChain)
+      for (const old of db.where("UserStateOption", "user", user)) db.delete("UserStateOption", old.id)
+      return { correct: true, outcome: "correct", next_chain: selected.nextChain }
     },
-    "Record the attempt and follow the complete sentence associated with a correct option.",
+    "Advance to a valid child immediately; options load separately.",
   ),
 } satisfies FunctionImplementations & Record<string, ServerFunction<any, any>>
 
