@@ -94,7 +94,29 @@ styl.innerHTML = `
 `
 document.head.appendChild(styl)
 
+export type StyleRules = { [property: string]: string | StyleRules }
 export type htmlKey = 'innerText'|'onclick' | 'oninput' | 'onkeydown' |'children'|'class'|'id'|'contentEditable'|'eventListeners'|'color'|'background' | 'style' | 'placeholder' | 'tabIndex' | 'colSpan' | 'type'
+
+let styleID = 0
+const cssName = (name: string) => name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)
+const applyStyle = (element: HTMLElement, rules: StyleRules) => {
+  const nested = Object.entries(rules).filter(([, value]) => typeof value !== "string") as [string, StyleRules][]
+  for (const [property, value] of Object.entries(rules)) {
+    if (typeof value === "string") element.style.setProperty(cssName(property), value)
+  }
+  if (!nested.length) return
+
+  const className = `html-style-${styleID++}`
+  element.classList.add(className)
+  for (const [selector, declarations] of nested) {
+    const body = Object.entries(declarations).map(([property, value]) => {
+      if (typeof value !== "string") throw new Error("Style selectors cannot be nested more than once")
+      return `${cssName(property)}:${value}`
+    }).join(";")
+    styl.sheet?.insertRule(`.${className}${selector}{${body}}`)
+  }
+}
+
 export const htmlElement = (tag:string, text:string, args?:Partial<Record<htmlKey, any>>):HTMLElement =>{
 
   const _element = document.createElement(tag)
@@ -120,7 +142,7 @@ export const htmlElement = (tag:string, text:string, args?:Partial<Record<htmlKe
         _element.addEventListener(event, listener)
       })
     }else if (key === 'style'){
-      Object.assign(_element.style, value as Record<string, string>)
+      applyStyle(_element, value as StyleRules)
     }else{
       _element[(key as 'innerText' | 'onclick' | 'oninput' | 'id' | 'contentEditable')] = value
     }
@@ -193,7 +215,8 @@ export const td:HTMLGenerator<HTMLTableCellElement> = newHtmlGenerator("td")
 export const th:HTMLGenerator<HTMLTableCellElement> = newHtmlGenerator("th")
 export const canvas:HTMLGenerator<HTMLCanvasElement> = newHtmlGenerator("canvas")
 
-export const style = (...rules: Record<string, string>[]) => ({style: Object.assign({}, ...rules)})
+export const style = (...rules: StyleRules[]) => ({style: Object.assign({}, ...rules)})
+export const hover = (rules: StyleRules) => style({":hover": rules})
 export const margin = (value: string) => style({margin: value})
 export const padding = (value: string) => style({padding: value})
 export const border = (value: string) => style({border: value})

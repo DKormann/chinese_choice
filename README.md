@@ -21,6 +21,20 @@ bun run dev
 
 Open <http://localhost:3030>.
 
+Create a `.env` file before requesting generated lesson content:
+
+```sh
+OPENROUTER_API_KEY=your_key_here
+# Optional defaults: cheap generation, stronger retry for invalid output
+OPENROUTER_MODEL=qwen/qwen3.5-flash-02-23
+OPENROUTER_VALIDATOR_MODEL=z-ai/glm-5
+```
+
+The key is read only by the Bun server and is never sent to the browser.
+GLM is called only when the default model returns malformed or semantically invalid lesson content.
+
+Use “Explore sentence tree” on the learner screen, or open `/#tree`, to inspect global chain branches and annotation status.
+
 The SQLite database defaults to the platform application-data directory. Set `APP_DATA_DIR` to choose another location, and `PORT` to override port `3030`.
 
 ## Commands

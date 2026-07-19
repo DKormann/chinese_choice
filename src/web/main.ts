@@ -9,6 +9,7 @@ const client = createClient()
 const users = stored("users", array(UserRow), [])
 type User = Infer<typeof UserRow>
 type LessonState = { chain: UUID; options: UUID[] }
+let lessonView = 0
 
 const ink = color.ink
 const muted = color.muted
@@ -44,6 +45,7 @@ function showError(error: unknown): void {
 }
 
 function renderProfiles(): void {
+  lessonView++
   const grid = div(style({ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "2rem", marginTop: "4rem" }))
 
   users.get().forEach((user, index) => {
@@ -55,8 +57,11 @@ function renderProfiles(): void {
       })),
       span(user.username, style({ display: "block", marginTop: ".9rem", color: muted })),
       style({ width: "9rem", padding: "0", border: "0", background: "none", cursor: "pointer" }),
+      function onclick(){
+        openLesson(user)
+      }
     )
-    card.onclick = () => void openLesson(user)
+
     grid.append(card)
   })
 
@@ -91,14 +96,68 @@ function renderProfiles(): void {
   }
   grid.append(add)
 
+  const explore = button("Explore sentence tree", style({
+    marginTop: "2.5rem", padding: ".75rem 1rem", border: `1px solid ${line}`, borderRadius: "999px",
+    color: muted, background: surface, cursor: "pointer",
+  }))
+  explore.onclick = () => { location.hash = "tree" }
+
   body.replaceChildren(div(
     pageStyle,
     style({ display: "grid", placeContent: "center", justifyItems: "center", padding: "3rem 1.5rem", textAlign: "center" }),
     brand(),
     h1("Who’s learning?", style({ margin: "3.5rem 0 .5rem", fontSize: "clamp(2.2rem, 5vw, 4.5rem)", letterSpacing: "-.05em" })),
-    p("Choose a space and ease back into Chinese.", style({ margin: "0", color: muted, fontSize: "1.05rem" })),
-    grid,
+    grid, explore,
   ))
+}
+
+async function renderTree(): Promise<void> {
+  lessonView++
+  body.replaceChildren(div(pageStyle, style({ display: "grid", placeContent: "center", color: muted }), "Loading sentence tree…"))
+  try {
+    const [chains, symbols] = await Promise.all([client.tables.Chain.all(), client.tables.Symbol.all()])
+    const symbolById = new Map(symbols.map(symbol => [symbol.id, symbol]))
+    const children = new Map<UUID | null, typeof chains>()
+    for (const chain of chains) {
+      const siblings = children.get(chain.prev) ?? []
+      siblings.push(chain)
+      children.set(chain.prev, siblings)
+    }
+    const rows = div(style({ display: "grid", gap: ".4rem", paddingBottom: "4rem" }))
+    const visited = new Set<UUID>()
+    const append = (parent: UUID | null, prefix: string, depth: number) => {
+      for (const chain of children.get(parent) ?? []) {
+        if (visited.has(chain.id)) continue
+        visited.add(chain.id)
+        const symbol = symbolById.get(chain.symbolID)
+        const text = prefix + (symbol?.mandarin_character ?? "?")
+        rows.append(div(
+          div(text, style({ fontFamily: "Songti SC, serif", fontSize: "1.35rem", color: ink })),
+          div(chain.meaning || "Not annotated", style({ color: chain.meaning ? muted : accent, fontSize: ".78rem" })),
+          div(`${(children.get(chain.id) ?? []).length} branches`, style({ color: muted, fontSize: ".7rem" })),
+          style({
+            display: "grid", gridTemplateColumns: "minmax(8rem, 1fr) minmax(12rem, 2fr) auto", gap: "1rem",
+            alignItems: "center", marginLeft: `${Math.min(depth, 12) * 1.25}rem`, padding: ".65rem .8rem",
+            border: `1px solid ${line}`, borderRadius: ".65rem", background: surface,
+          }),
+        ))
+        append(chain.id, text, depth + 1)
+      }
+    }
+    append(null, "", 0)
+
+    const back = button("← Learners", style({ padding: ".65rem 1rem", border: `1px solid ${line}`, borderRadius: "999px", color: muted, background: surface }))
+    back.onclick = () => { location.hash = "" }
+    body.replaceChildren(div(
+      pageStyle,
+      div(style({ width: "min(1100px, calc(100% - 3rem))", margin: "auto", padding: "2rem 0" }),
+        div(style({ display: "flex", alignItems: "center", justifyContent: "space-between" }), brand(), back),
+        h1("Sentence tree", style({ margin: "3rem 0 .5rem" })),
+        p(`${chains.length} chain nodes · ${symbols.length} characters`, style({ margin: "0 0 2rem", color: muted })),
+        rows,
+      ),
+    ))
+  } catch (error) { showError(error) }
 }
 
 async function readChain(id: UUID) {
@@ -115,8 +174,8 @@ async function readChain(id: UUID) {
 
 function character(value: string, pinyin: string, meaning: string): HTMLElement {
   const tip = span(
-    span(pinyin, style({ display: "block", color: ink, fontWeight: "700" })),
-    span(meaning, style({ display: "block", marginTop: ".25rem", color: muted })),
+    span(pinyin || "Annotating…", style({ display: "block", color: ink, fontWeight: "700" })),
+    span(meaning || "Translation is being prepared", style({ display: "block", marginTop: ".25rem", color: muted })),
     style({
       position: "absolute", left: "50%", bottom: "calc(100% + 1rem)", zIndex: "2", minWidth: "8rem",
       padding: ".75rem 1rem", border: `1px solid ${line}`, borderRadius: ".7rem", background: surface,
@@ -134,9 +193,12 @@ function character(value: string, pinyin: string, meaning: string): HTMLElement 
 }
 
 async function renderLesson(user: User, state: LessonState): Promise<void> {
+  const view = ++lessonView
   if (state.options.length !== 5) throw new Error(`Backend returned ${state.options.length} choices; expected 5`)
   const [chain, choices] = await Promise.all([readChain(state.chain), Promise.all(state.options.map(id => client.tables.Symbol.get(id)))])
   if (choices.some(choice => !choice)) throw new Error("Backend returned a missing symbol")
+  const currentChain = chain.at(-1)
+  if (!currentChain) throw new Error("Backend returned an empty chain")
 
   const sentence = div(style({
     display: "flex", justifyContent: "center", margin: "2.2rem 0 4.8rem", color: ink,
@@ -149,29 +211,36 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
   }
 
   const status = p("Choose what comes next", style({ minHeight: "1.5rem", margin: "1.5rem 0", color: muted, fontSize: ".85rem" }))
-  const choicesRow = div(style({ display: "grid", gridTemplateColumns: "repeat(5, minmax(90px, 1fr))", gap: ".8rem", overflowX: "auto" }))
+  const choicesRow = div(style({
+    display: "grid", gridTemplateColumns: "repeat(5, minmax(90px, 1fr))", gap: ".8rem",
+    padding: ".25rem 1px 1px", overflowX: "auto",
+  }))
   choices.forEach((choice, index) => {
     const symbol = choice!
     const choiceButton = button(
       span(String(index + 1), style({ position: "absolute", top: ".65rem", left: ".75rem", color: "#686a61", fontSize: ".7rem" })),
       span(symbol.mandarin_character, style({ fontFamily: "Songti SC, serif", fontSize: "3rem" })),
-      span(symbol.pinyin, style({ color: muted, fontSize: ".78rem" })),
+      span(symbol.pinyin || "…", style({ color: muted, fontSize: ".78rem" })),
       style({
         position: "relative", display: "grid", placeItems: "center", minHeight: "9rem", padding: "1rem",
         margin: "0", border: `1px solid ${line}`, borderRadius: "1rem", color: ink, background: surface,
         cursor: "pointer", transition: ".18s",
+        ":enabled:hover": { borderColor: accent, transform: "translateY(-3px)" },
       }),
     )
-    choiceButton.addEventListener("mouseenter", () => { if (!choiceButton.disabled) choiceButton.style.transform = "translateY(-3px)" })
-    choiceButton.addEventListener("mouseleave", () => { choiceButton.style.transform = "" })
     choiceButton.onclick = async () => {
+      lessonView++
       for (const candidate of choicesRow.querySelectorAll("button")) candidate.disabled = true
+      status.textContent = "Checking… generating the next challenge may take a moment."
       try {
         const result = await client.funcs.tryOption({ user: user.id, option: symbol.id })
         if (!result.correct) {
-          choiceButton.style.borderColor = color.red
-          choiceButton.style.background = color.dangerSoft
-          status.textContent = "Not this one — have another look."
+          const possible = result.outcome === "possible"
+          choiceButton.style.borderColor = possible ? accent : color.red
+          choiceButton.style.background = possible ? color.accentSoft : color.dangerSoft
+          status.textContent = possible
+            ? "Technically possible, but not the intended continuation. Keep looking."
+            : "Not this one — have another look."
           for (const candidate of choicesRow.querySelectorAll("button")) candidate.disabled = false
           return
         }
@@ -193,11 +262,16 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
     div(
       style({ width: "min(1050px, calc(100% - 3rem))", margin: "7vh auto 0", textAlign: "center" }),
       p("Continue the sentence", style({ margin: "0 0 2.8rem", color: accent, fontSize: ".75rem", fontWeight: "750", letterSpacing: ".18em", textTransform: "uppercase" })),
-      p(chain.map(item => item.meaning).join(" · "), style({ margin: "0", color: ink, fontSize: "clamp(1rem, 2vw, 1.35rem)" })),
-      p(chain.map(item => item.pinyin).join("  "), style({ margin: ".55rem 0 0", color: muted, fontSize: ".9rem", letterSpacing: ".08em" })),
+      p(currentChain.completion === "complete" ? "Complete sentence" : currentChain.completion === "incomplete" ? "Incomplete prefix" : "Checking completeness…", style({ margin: "0 0 .7rem", color: muted, fontSize: ".72rem", letterSpacing: ".1em", textTransform: "uppercase" })),
+      p(currentChain.meaning || "Translation is being prepared…", style({ margin: "0", color: ink, fontSize: "clamp(1rem, 2vw, 1.35rem)" })),
+      p(currentChain.pinyin || "Pinyin is being prepared…", style({ margin: ".55rem 0 0", color: muted, fontSize: ".9rem", letterSpacing: ".08em" })),
       sentence, choicesRow, status,
     ),
   ))
+  const annotationsPending = !currentChain.pinyin || !currentChain.meaning || choices.some(choice => !choice!.pinyin || !choice!.meaning)
+  if (annotationsPending) setTimeout(() => {
+    if (lessonView === view) void renderLesson(user, state).catch(showError)
+  }, 1500)
 }
 
 async function openLesson(user: User): Promise<void> {
@@ -206,4 +280,10 @@ async function openLesson(user: User): Promise<void> {
   catch (error) { showError(error) }
 }
 
-renderProfiles()
+function renderRoute(): void {
+  if (location.hash === "#tree") void renderTree()
+  else renderProfiles()
+}
+
+window.addEventListener("hashchange", renderRoute)
+renderRoute()

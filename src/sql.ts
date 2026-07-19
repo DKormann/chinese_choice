@@ -230,7 +230,9 @@ export function createDB<const T extends Tables>(tables: T, sqlite: Database) {
       const current = definition(tableName)
       const names = Object.keys(current.columns)
       const values = names.map(name => encodeValue(current.columns[name]!, row[name] as never))
-      sqlite.query(`INSERT OR REPLACE INTO ${String(tableName)} (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")})`).run(...values)
+      const updates = names.filter(name => name !== "id").map(name => `${name} = excluded.${name}`).join(", ")
+      const conflict = updates ? `DO UPDATE SET ${updates}` : "DO NOTHING"
+      sqlite.query(`INSERT INTO ${String(tableName)} (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")}) ON CONFLICT(id) ${conflict}`).run(...values)
       return row.id as TableRow<T[K]>["id"]
     },
 
