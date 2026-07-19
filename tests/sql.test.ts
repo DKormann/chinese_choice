@@ -10,6 +10,11 @@ afterEach(() => sqlite?.close())
 describe("SQL database", () => {
   const id = (suffix: string) => asUUID(`00000000-0000-4000-8000-${suffix.padStart(12, "0")}`)
 
+  test("defaults tables to public and supports private tables", () => {
+    expect(tables.Symbol.access).toBe("public")
+    expect(tables.User.access).toBe("private")
+  })
+
   test("sets, reads, queries, and deletes rows", () => {
     sqlite = new Database(":memory:")
     const db = createDB(tables, sqlite)

@@ -34,12 +34,14 @@ export async function databaseServer(path: string[], request: Request): Promise<
       if (!fn || id) return json({ error: "Not found" }, 404)
       const body = await request.json() as { args?: unknown }
       const args = validate(object(fn.parameters, { additionalProperties: false }), body.args)
+      db.assertReferences(fn.parameters, args)
       const result = await fn.runner(db, args as never)
-      return json(validate(fn.result, result))
+      return json(result)
     }
 
     if (!tableName || !(tableName in tables)) return json({ error: "Not found" }, 404)
     const table = tableName as keyof typeof tables
+    if (tables[table].access === "private") return json({ error: "Not found" }, 404)
     if (request.method === "GET" && operation === "all") return json(db.all(table))
     if (request.method === "GET" && operation === "get" && id) return json(db.get(table, id as never))
     if (request.method === "POST" && operation === "where") {

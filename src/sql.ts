@@ -41,8 +41,9 @@ export type Row<C extends Columns> = { -readonly [K in keyof C]: Infer<C[K]> }
 export type InsertRow<C extends Columns> = Partial<Row<C>>
 
 export type ReferentialAction = "cascade" | "restrict" | "set null" | "set default" | "no action"
+export type Access = "public" | "private"
 type Reference = {
-  target: Table<any, any> | "self"
+  target: Table<any, any, any> | "self"
   onDelete?: ReferentialAction
   onUpdate?: ReferentialAction
 }
@@ -50,7 +51,9 @@ type Reference = {
 export type Table<
   C extends Columns = Columns,
   I extends readonly (keyof C)[] = readonly (keyof C)[],
+  A extends Access = Access,
 > = {
+  access: A
   columns: C
   indexes: I
 }
@@ -60,20 +63,23 @@ type ColumnsWithId<C extends Record<string, Schema<any>>> = { readonly id: typeo
 export function table<
   const C extends Record<string, Schema<any>>,
   const I extends readonly (keyof ColumnsWithId<C>)[] = readonly [],
+  const A extends Access = "public",
 >(
   columns: C extends { id: unknown } ? never : C,
-  options: { indexes?: I } = {},
-): Table<ColumnsWithId<C>, I> {
+  options: { access?: A; indexes?: I } = {},
+): Table<ColumnsWithId<C>, I, A> {
   return {
+    access: options.access ?? "public" as A,
     columns: { id: UUID, ...columns },
     indexes: options.indexes ?? [] as unknown as I,
   }
 }
 
-export type Tables = Record<string, Table<any, any>>
-export type TableRow<T> = T extends Table<infer C, any> ? Row<C> : never
-export type TableInsert<T> = T extends Table<infer C, any> ? InsertRow<C> : never
-export type TableColumns<T> = T extends Table<infer C, any> ? C : never
+export type Tables = Record<string, Table<any, any, any>>
+export type PublicTables<T> = { [K in keyof T as T[K] extends { access: "public" } ? K : never]: T[K] }
+export type TableRow<T> = T extends Table<infer C, any, any> ? Row<C> : never
+export type TableInsert<T> = T extends Table<infer C, any, any> ? InsertRow<C> : never
+export type TableColumns<T> = T extends Table<infer C, any, any> ? C : never
 
 const schemaReferences = new WeakMap<Schema<any>, Reference>()
 
@@ -83,15 +89,15 @@ type RefOptions = {
   onUpdate?: ReferentialAction
 }
 
-export function ref<T extends Table<any, any>>(
+export function ref<T extends Table<any, any, any>>(
   target: T,
   options?: RefOptions & { nullable?: false },
 ): TableColumns<T>["id"]
-export function ref<T extends Table<any, any>>(
+export function ref<T extends Table<any, any, any>>(
   target: T,
   options: RefOptions & { nullable: true },
 ): Schema<Infer<TableColumns<T>["id"]> | null>
-export function ref<T extends Table<any, any>>(target: T, options: RefOptions = {}): Schema<any> {
+export function ref<T extends Table<any, any, any>>(target: T, options: RefOptions = {}): Schema<any> {
   const idSchema = target.columns.id
   const schema: Schema<any> = options.nullable
     ? { json: { anyOf: [{ type: "null" }, idSchema.json] } }
@@ -169,6 +175,20 @@ export function createDB<const T extends Tables>(tables: T, sqlite: Database) {
   }
 
   const db = {
+    assertReferences(schemas: Record<string, Schema<any>>, values: Record<string, unknown>): void {
+      for (const [name, schema] of Object.entries(schemas)) {
+        const reference = schemaReferences.get(schema)
+        const value = values[name]
+        if (!reference || value == null) continue
+        if (reference.target === "self") throw new Error(`Self-reference is not valid for function parameter ${name}`)
+        const targetName = tableNames.get(reference.target)
+        if (!targetName) throw new Error(`Reference target for parameter ${name} is not registered in this database`)
+        const encodedId = encodeValue(reference.target.columns.id, value as UUID)
+        const exists = sqlite.query(`SELECT 1 FROM ${targetName} WHERE id = ?`).get(encodedId)
+        if (!exists) throw new Error(`Referenced ${targetName} row does not exist: ${String(value)}`)
+      }
+    },
+
     transaction<R>(runner: () => R): R {
       return sqlite.transaction(runner)()
     },

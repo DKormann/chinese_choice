@@ -1,5 +1,4 @@
-import type { TableRow } from "./sql"
-import type { Infer } from "./schema"
+import type { PublicTables, TableRow } from "./sql"
 import { functions, tables, type ServerFunctions } from "./tables"
 import type { InferParameters } from "./typedFunction"
 
@@ -11,7 +10,7 @@ type TableClient<T extends { id: string }> = {
 
 type FunctionClient<K extends keyof ServerFunctions> = (
   args: InferParameters<ServerFunctions[K]["parameters"]>,
-) => Promise<Infer<ServerFunctions[K]["result"]>>
+) => Promise<Awaited<ReturnType<ServerFunctions[K]["runner"]>>>
 
 async function responseJson<T>(response: Response): Promise<T> {
   if (!response.ok) throw new Error(await response.text())
@@ -40,9 +39,11 @@ export function createClient(baseUrl = "") {
     }).then(responseJson)
   }])) as { [K in keyof ServerFunctions]: FunctionClient<K> }
 
+  const publicTables = Object.entries(tables).filter(([, definition]) => definition.access === "public")
+
   return {
-    tables: Object.fromEntries(Object.keys(tables).map(name => [name, tableClient(name)])) as {
-      [K in keyof typeof tables]: TableClient<TableRow<typeof tables[K]>>
+    tables: Object.fromEntries(publicTables.map(([name]) => [name, tableClient(name)])) as {
+      [K in keyof PublicTables<typeof tables>]: TableClient<TableRow<PublicTables<typeof tables>[K]>>
     },
     funcs,
   }

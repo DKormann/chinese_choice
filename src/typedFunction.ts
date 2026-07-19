@@ -11,15 +11,13 @@ export type InferParameters<P extends FunctionParameters> = {
 export type ServerFunction<P extends FunctionParameters, R extends JsonData> = {
   description: string
   parameters: P
-  result: Schema<R>
   runner: (db: ReturnType<typeof createDB<typeof tables>>, args: InferParameters<P>) => Promise<R> | R
 }
 
 export function serverFunction<const P extends FunctionParameters, R extends JsonData>(
   parameters: P,
-  result: Schema<R>,
   runner: ServerFunction<P, R>["runner"],
   description = "",
 ): ServerFunction<P, R> {
-  return { parameters, result, runner, description }
+  return { parameters, runner, description }
 }
