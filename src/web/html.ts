@@ -1,6 +1,3 @@
-// import type { JsonData, Store } from "../storage";
-
-import type { JsonData, Writable } from "../schema";
 export const body = document.body;
 
 const colorPalette = {
@@ -94,8 +91,8 @@ styl.innerHTML = `
 `
 document.head.appendChild(styl)
 
-export type StyleRules = { [property: string]: string | StyleRules }
-export type htmlKey = 'innerText'|'onclick' | 'oninput' | 'onkeydown' |'children'|'class'|'id'|'contentEditable'|'eventListeners'|'color'|'background' | 'style' | 'placeholder' | 'tabIndex' | 'colSpan' | 'type'
+type StyleRules = { [property: string]: string | StyleRules }
+type htmlKey = 'innerText'|'onclick' | 'oninput' | 'onkeydown'|'children'|'id'|'contentEditable'|'eventListeners'|'style'|'placeholder'|'tabIndex'|'type'
 
 let styleID = 0
 const cssName = (name: string) => name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)
@@ -117,7 +114,7 @@ const applyStyle = (element: HTMLElement, rules: StyleRules) => {
   }
 }
 
-export const htmlElement = (tag:string, text:string, args?:Partial<Record<htmlKey, any>>):HTMLElement =>{
+const htmlElement = (tag:string, text:string, args?:Partial<Record<htmlKey, any>>):HTMLElement =>{
 
   const _element = document.createElement(tag)
   _element.textContent = text
@@ -150,8 +147,8 @@ export const htmlElement = (tag:string, text:string, args?:Partial<Record<htmlKe
   return _element
 }
 
-export type HTMLArg = string | number | HTMLElement | Partial<Record<htmlKey, any>>  | Promise<HTMLArg> | HTMLArg[] | Function
-export const html = (tag:string, ...cs:HTMLArg[]):HTMLElement=>{
+type HTMLArg = string | number | HTMLElement | Partial<Record<htmlKey, any>> | Promise<HTMLArg> | HTMLArg[] | Function
+const html = (tag:string, ...cs:HTMLArg[]):HTMLElement=>{
   let children: HTMLElement[] = []
   let args: Partial<Record<htmlKey, any>> = {}
 
@@ -168,11 +165,6 @@ export const html = (tag:string, ...cs:HTMLArg[]):HTMLElement=>{
     }
     else if (arg instanceof HTMLElement) children.push(arg)
     else if (Array.isArray(arg)) arg.forEach(x=>add_arg(x))
-    // else if ('get' in arg && typeof arg.get === 'function') {
-    //   const el = span()
-    //   children.push(el)
-    //   if ('onupdate' in arg && typeof arg.onupdate === 'function') arg.onupdate(x=>el.replaceChildren(x))
-    // }
     else if (typeof arg == "function"){
       if (arg.name == "oninput") args.oninput = arg
       else if (arg.name == "onclick" || arg.length < 2) args.onclick = arg
@@ -191,40 +183,16 @@ export const html = (tag:string, ...cs:HTMLArg[]):HTMLElement=>{
   return htmlElement(tag, "", {...args, children})
 }
 
-export type HTMLGenerator<T extends HTMLElement = HTMLElement> = (...cs:HTMLArg[]) => T
+type HTMLGenerator<T extends HTMLElement = HTMLElement> = (...cs:HTMLArg[]) => T
 const newHtmlGenerator = <T extends HTMLElement>(tag:string)=>(...cs:HTMLArg[]):T=>html(tag, ...cs) as T
 
 export const p:HTMLGenerator<HTMLParagraphElement> = newHtmlGenerator("p")
-export const a:HTMLGenerator<HTMLAnchorElement> = newHtmlGenerator("a")
 export const h1:HTMLGenerator<HTMLHeadingElement> = newHtmlGenerator("h1")
-export const h2:HTMLGenerator<HTMLHeadingElement> = newHtmlGenerator("h2")
-export const h3:HTMLGenerator<HTMLHeadingElement> = newHtmlGenerator("h3")
-export const h4:HTMLGenerator<HTMLHeadingElement> = newHtmlGenerator("h4")
-
 export const div:HTMLGenerator<HTMLDivElement> = newHtmlGenerator("div")
-export const li:HTMLGenerator<HTMLLIElement> = newHtmlGenerator("li")
-export const pre:HTMLGenerator<HTMLPreElement> = newHtmlGenerator("pre")
 export const span:HTMLGenerator<HTMLSpanElement> = newHtmlGenerator("span")
-export const textarea:HTMLGenerator<HTMLTextAreaElement> = newHtmlGenerator("textarea")
-
 export const button:HTMLGenerator<HTMLButtonElement> = newHtmlGenerator("button")
-export const table = (rows: HTMLArg[][], ...args: HTMLArg[]) => newHtmlGenerator("table")( style({borderSpacing: "1em .4em"}) , rows.map(cells=>tr(cells.map(cell=>td(cell)))), ...args)
-
-export const tr:HTMLGenerator<HTMLTableRowElement> = newHtmlGenerator("tr")
-export const td:HTMLGenerator<HTMLTableCellElement> = newHtmlGenerator("td")
-export const th:HTMLGenerator<HTMLTableCellElement> = newHtmlGenerator("th")
-export const canvas:HTMLGenerator<HTMLCanvasElement> = newHtmlGenerator("canvas")
 
 export const style = (...rules: StyleRules[]) => ({style: Object.assign({}, ...rules)})
-export const hover = (rules: StyleRules) => style({":hover": rules})
-export const margin = (value: string) => style({margin: value})
-export const padding = (value: string) => style({padding: value})
-export const border = (value: string) => style({border: value})
-export const borderRadius = (value: string) => style({borderRadius: value})
-export const width = (value: string) => style({width: value})
-export const height = (value: string) => style({height: value})
-export const display = (value: string) => style({display: value})
-export const background = (value: string = "var(--background)") => style({background: value})
 
 export const input:HTMLGenerator<HTMLInputElement> = (...cs)=>{
   const content = cs.filter(c=>typeof c == 'string').join(' ')
@@ -232,94 +200,3 @@ export const input:HTMLGenerator<HTMLInputElement> = (...cs)=>{
   el.value = content
   return el
 }
-
-
-export const mapWritable = <T extends JsonData>(wr: Writable<T>, f:(t:T)=>HTMLElement | HTMLElement[]):HTMLElement=>{
-  const dv = div()
-  let ref = new WeakRef(dv)
-
-  function runner (x:T){
-    let el = ref.deref()
-    if (!el){
-      wr.unsubscribe(runner)
-      return
-    }
-    let news = f(x)
-    el.replaceChildren(div(news))
-  }
-  wr.subscribe(runner)
-
-  return dv
-}
-
-export const popup = (...cs:HTMLArg[])=>{
-  const dialogfield = div({
-    style: {
-      background: color.background,
-      color: color.color,
-      padding: "1em 4em",
-      paddingBottom: "2em",
-      borderRadius: "1em",
-      zIndex: "2000",
-      overflowY: "scroll",
-      minWidth: "20vw",
-      maxHeight: "80vh",
-    }},
-    ...cs)
-
-  const popupbackground = div(
-    {style:{
-      position: "fixed",
-      top: "0",
-      left: "0",
-      width: "100%",
-      height: "100%",
-      background: "rgba(166, 166, 166, 0.5)",
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      zIndex: "2000",
-    }}
-  )
-
-  popupbackground.appendChild(dialogfield);
-  document.body.appendChild(popupbackground);
-  popupbackground.onclick = () => {popupbackground.remove(); }
-  dialogfield.onclick = (e) => e.stopPropagation();
-  return popupbackground
-
-}
-
-export const errorpopup = (e:Error | string) =>{
-  popup(div(
-    style({
-      background:color.background,
-      border:"1px solid "+color.gray,
-      padding:"1em",
-      borderRadius:".4em",
-      color:color.red,
-    }),
-    h2("Error"),
-    p(String(e))
-  ))
-  throw (e instanceof Error) ? e : new Error(String(e))
-}
-
-export function writableSpan <T extends string|number> (wr: Writable<T>) : HTMLElement {
-  const el = span(wr.get())
-  wr.subscribe((v)=>el.innerText = String(v))
-  return el
-}
-
-export const fatButton = (text:string, onclick:()=>void):HTMLElement=>span(text, {
-  style:{
-    cursor:"pointer",
-    marginLeft:"1em",
-    fontSize:"0.8em",
-    color:color.gray,
-    border:`1px solid ${color.gray}`,
-    padding:"0.2em",
-    borderRadius:".3em",
-    background: color.background,
-  },
-  onclick})

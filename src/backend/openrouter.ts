@@ -93,7 +93,14 @@ export async function openRouterJson<T>(schema: Schema<T>, messages: Message[], 
     )
   }
 
-  const body = await response.json() as ChatResponse
+  const responseText = await response.text()
+  let body: ChatResponse
+  try {
+    body = JSON.parse(responseText) as ChatResponse
+  } catch {
+    llmLog(requestId, "invalid_response", { model: selectedModel, status: response.status, response: responseText })
+    throw new OpenRouterRequestError("OpenRouter returned a non-JSON response", response.status, true)
+  }
   llmLog(requestId, "response", {
     model: selectedModel,
     status: response.status,

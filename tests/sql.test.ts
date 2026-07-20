@@ -52,8 +52,8 @@ describe("SQL database", () => {
     const firstId = id("21")
     const secondId = id("22")
     db.set("Symbol", { id: symbolId, mandarin_character: "你", pinyin: "nǐ", meaning: "you" })
-    db.set("Chain", { id: firstId, prev: null, symbolID: symbolId, pinyin: "nǐ", meaning: "you", completion: "complete" })
-    db.set("Chain", { id: secondId, prev: firstId, symbolID: symbolId, pinyin: "hǎo", meaning: "good", completion: "complete" })
+    db.set("Chain", { id: firstId, prev: null, symbolID: symbolId, pinyin: "nǐ", meaning: "you" })
+    db.set("Chain", { id: secondId, prev: firstId, symbolID: symbolId, pinyin: "hǎo", meaning: "good" })
 
     db.set("Symbol", { id: symbolId, mandarin_character: "你", pinyin: "nǐ", meaning: "you (updated)" })
     expect(db.forceGet("Symbol", symbolId).meaning).toBe("you (updated)")

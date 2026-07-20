@@ -32,11 +32,6 @@ export const Symbol = table({
   pinyin: string,
   meaning: string,
 })
-
-export const Knowledge = table({
-  symbol: ref(Symbol, { onDelete: "cascade" }),
-  clicked: number,
-})
 ```
 
 ### Relationships
@@ -79,27 +74,27 @@ Define server functions in the exported `functions` object in `src/tables.ts` wi
 - A parameter declared as `ref(User)` is validated as a UUID and checked for existence before the runner executes.
 - Return types are inferred from the runner. Do not provide a duplicate result schema.
 - Keep runners small. Extract shared logic only when it improves clarity.
-- Keep the `FUNCS` contract aligned with the implemented function map when it is used to describe the product API.
+- Infer client contracts directly from the implemented server-function map; do not maintain a duplicate `FUNCS` interface.
 
 The backend is authoritative for lesson state and choices. The frontend must use returned IDs to fetch real rows; it must not invent lesson data or silently fall back to local fixtures. Continuation endpoints guarantee exactly five existing `Symbol` choices.
 
 ### Learning model
 
 - `Symbol` stores one Chinese character with fixed global pinyin and meaning.
-- `Chain` rows are the complete global cache and tree through `prev`; do not duplicate edges or sentence membership in another table. A child is a valid continuation when its subtree contains an annotated `complete` node.
+- `Chain` rows are the complete global cache and tree through `prev`; do not duplicate edges or sentence membership in another table. Every direct child is valid because chain edges are created only from generated full sentences. Never traverse descendants to prove validity.
 - User lesson state is only the current chain. It does not retain or follow a source sentence.
 - Full-sentence generation returns the sentence, full pinyin, and translation. Insert its path and annotate its complete leaf immediately. Annotate intermediate visible prefixes independently without revealing later characters.
-- Batch missing visible character annotations into one context-free call.
+- Annotate each missing character in its own context-free call and each chain prefix in its own call. Run independent calls concurrently, but never batch annotations that could influence each other.
 - Before returning a challenge, ensure all five option characters and both correct child chains are annotated. A correct click commits and returns the child chain immediately; the browser renders it before separately requesting the next five options.
 - At each step, aim for two valid sentence continuations, but do not require two distinct next characters. Generate only the missing number of fresh sentences once. If valid sentences collapse onto one child character, show one correct button and four random buttons; never retry to force linguistic diversity.
+- Represent sentence completion structurally with a direct `。` child. Do not store a separate completion field. `。` may appear as a choice; after it is selected, show the completed sentence and start a fresh lesson when options are requested.
 - LLMs make linguistic content decisions. Do not include learner mistakes or pedagogy in generation prompts yet. OpenRouter calls must remain server-only.
 - Use the cheap default model for generation. Retry with the validator model only when output fails JSON/schema or lesson invariants; do not routinely pay for two calls.
 - Log LLM requests, raw responses, timings, validation failures, and retry attempts on the server. Never log API keys or authorization headers.
 - Generated chain nodes are globally reusable. A learner's current five options are private and persist until the learner chooses a correct option.
 - Every option outcome is exactly `correct`, `possible`, or `wrong`. The two deliberately generated sentence continuations are `correct` and advance. Random characters are rated only as `possible` or `wrong`; possible choices receive gentle feedback but never advance or affect knowledge.
-- Every annotated chain is classified `complete` or `incomplete`. Incomplete translations/descriptions must visibly remain unfinished rather than pretending the prefix is a sentence.
 - A wrong attempt is recorded, affects character review state, and does not advance or replace the current options. The learner retries until correct.
-- Record every click as an immutable `Attempt`; derived `Knowledge` rows are only scheduling summaries.
+- Record every click as an immutable `Attempt`. Derive mistake counts from attempts when scheduling needs them; do not maintain a duplicate summary table.
 - The `#tree` browser route is a read-only explorer for the global chain tree. Keep it usable without exposing private learner state.
 
 ### Frontend

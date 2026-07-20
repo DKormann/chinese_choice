@@ -6,7 +6,7 @@ import { UserRow } from "../tables"
 import { body, button, color, div, h1, input, p, span, style } from "./html"
 
 const client = createClient()
-const users = stored("users", array(UserRow), [])
+const users = stored("users-dot-v1", array(UserRow), [])
 type User = Infer<typeof UserRow>
 type LessonState = { chain: UUID; options: UUID[] }
 let lessonView = 0
@@ -172,6 +172,16 @@ async function readChain(id: UUID) {
   return chain
 }
 
+async function isComplete(id: UUID): Promise<boolean> {
+  const current = await client.tables.Chain.get(id)
+  if (!current) throw new Error(`Missing chain row ${id}`)
+  const symbol = await client.tables.Symbol.get(current.symbolID)
+  if (symbol?.mandarin_character === "。") return true
+  const children = await client.tables.Chain.where("prev", id)
+  const childSymbols = await Promise.all(children.map(child => client.tables.Symbol.get(child.symbolID)))
+  return childSymbols.some(child => child?.mandarin_character === "。")
+}
+
 function character(value: string, pinyin: string, meaning: string): HTMLElement {
   const tip = span(
     span(pinyin || "Annotating…", style({ display: "block", color: ink, fontWeight: "700" })),
@@ -192,23 +202,46 @@ function character(value: string, pinyin: string, meaning: string): HTMLElement 
   return el
 }
 
-async function renderLesson(user: User, state: LessonState): Promise<void> {
-  const view = ++lessonView
-  if (state.options.length !== 5) throw new Error(`Backend returned ${state.options.length} choices; expected 5`)
-  const [chain, choices] = await Promise.all([readChain(state.chain), Promise.all(state.options.map(id => client.tables.Symbol.get(id)))])
-  if (choices.some(choice => !choice)) throw new Error("Backend returned a missing symbol")
-  const currentChain = chain.at(-1)
-  if (!currentChain) throw new Error("Backend returned an empty chain")
+async function lessonContext(chainID: UUID) {
+  const chain = await readChain(chainID)
+  const current = chain.at(-1)
+  if (!current) throw new Error("Backend returned an empty chain")
+  const [complete, symbols] = await Promise.all([
+    isComplete(chainID),
+    Promise.all(chain.map(item => client.tables.Symbol.get(item.symbolID))),
+  ])
+  if (symbols.some(symbol => !symbol)) throw new Error("Chain contains a missing symbol")
+  const resolved = symbols.map(symbol => symbol!)
+  return { chainID, current, complete, ended: resolved.at(-1)?.mandarin_character === "。", symbols: resolved }
+}
 
+function showLesson(user: User, context: Awaited<ReturnType<typeof lessonContext>>, choices: HTMLElement, status: HTMLElement): void {
   const sentence = div(style({
     display: "flex", justifyContent: "center", margin: "2.2rem 0 4.8rem", color: ink,
     fontFamily: "Songti SC, Noto Serif CJK SC, serif", fontSize: "clamp(4.5rem, 12vw, 9rem)", lineHeight: "1.05",
   }))
-  for (const item of chain) {
-    const symbol = await client.tables.Symbol.get(item.symbolID)
-    if (!symbol) throw new Error(`Missing symbol ${item.symbolID}`)
-    sentence.append(character(symbol.mandarin_character, symbol.pinyin, symbol.meaning))
-  }
+  context.symbols.forEach(symbol => sentence.append(character(symbol.mandarin_character, symbol.pinyin, symbol.meaning)))
+  const account = button(user.username, style({ padding: ".65rem 1rem", border: `1px solid ${line}`, borderRadius: "999px", color: muted, background: surface }))
+  account.onclick = renderProfiles
+  body.replaceChildren(div(
+    pageStyle,
+    div(style({ display: "flex", alignItems: "center", justifyContent: "space-between", width: "min(1120px, calc(100% - 3rem))", margin: "auto", padding: "2rem 0" }), brand(), account),
+    div(
+      style({ width: "min(1050px, calc(100% - 3rem))", margin: "7vh auto 0", textAlign: "center" }),
+      p(context.ended ? "Sentence complete" : "Continue the sentence", style({ margin: "0 0 2.8rem", color: accent, fontSize: ".75rem", fontWeight: "750", letterSpacing: ".18em", textTransform: "uppercase" })),
+      p(context.ended ? "Review before continuing" : context.complete ? "Complete sentence" : "Incomplete prefix", style({ margin: "0 0 .7rem", color: muted, fontSize: ".72rem", letterSpacing: ".1em", textTransform: "uppercase" })),
+      p(context.current.meaning || "Translation is being prepared…", style({ margin: "0", color: ink, fontSize: "clamp(1rem, 2vw, 1.35rem)" })),
+      p(context.current.pinyin || "Pinyin is being prepared…", style({ margin: ".55rem 0 0", color: muted, fontSize: ".9rem", letterSpacing: ".08em" })),
+      sentence, choices, status,
+    ),
+  ))
+}
+
+async function renderLesson(user: User, state: LessonState): Promise<void> {
+  const view = ++lessonView
+  if (state.options.length !== 5) throw new Error(`Backend returned ${state.options.length} choices; expected 5`)
+  const [context, choices] = await Promise.all([lessonContext(state.chain), Promise.all(state.options.map(id => client.tables.Symbol.get(id)))])
+  if (choices.some(choice => !choice)) throw new Error("Backend returned a missing symbol")
 
   const status = p("Choose what comes next", style({ minHeight: "1.5rem", margin: "1.5rem 0", color: muted, fontSize: ".85rem" }))
   const choicesRow = div(style({
@@ -235,7 +268,7 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
       status.textContent = "Checking… generating the next challenge may take a moment."
       try {
         const result = await client.funcs.tryOption({ user: user.id, option: symbol.id })
-        if (!result.correct) {
+        if (result.outcome !== "correct") {
           const possible = result.outcome === "possible"
           choiceButton.style.borderColor = possible ? accent : color.red
           choiceButton.style.background = possible ? color.accentSoft : color.dangerSoft
@@ -248,27 +281,14 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
         choiceButton.style.borderColor = accent
         choiceButton.style.background = color.accentSoft
         status.textContent = "Correct. Loading choices…"
-        await renderLoadingOptions(user, result.next_chain)
+        await renderLoadingOptions(user, result.nextChain)
       } catch (error) { showError(error) }
     }
     choicesRow.append(choiceButton)
   })
 
-  const account = button(user.username, style({ padding: ".65rem 1rem", border: `1px solid ${line}`, borderRadius: "999px", color: muted, background: surface }))
-  account.onclick = renderProfiles
-  body.replaceChildren(div(
-    pageStyle,
-    div(style({ display: "flex", alignItems: "center", justifyContent: "space-between", width: "min(1120px, calc(100% - 3rem))", margin: "auto", padding: "2rem 0" }), brand(), account),
-    div(
-      style({ width: "min(1050px, calc(100% - 3rem))", margin: "7vh auto 0", textAlign: "center" }),
-      p("Continue the sentence", style({ margin: "0 0 2.8rem", color: accent, fontSize: ".75rem", fontWeight: "750", letterSpacing: ".18em", textTransform: "uppercase" })),
-      p(currentChain.completion === "complete" ? "Complete sentence" : currentChain.completion === "incomplete" ? "Incomplete prefix" : "Checking completeness…", style({ margin: "0 0 .7rem", color: muted, fontSize: ".72rem", letterSpacing: ".1em", textTransform: "uppercase" })),
-      p(currentChain.meaning || "Translation is being prepared…", style({ margin: "0", color: ink, fontSize: "clamp(1rem, 2vw, 1.35rem)" })),
-      p(currentChain.pinyin || "Pinyin is being prepared…", style({ margin: ".55rem 0 0", color: muted, fontSize: ".9rem", letterSpacing: ".08em" })),
-      sentence, choicesRow, status,
-    ),
-  ))
-  const annotationsPending = !currentChain.pinyin || !currentChain.meaning || choices.some(choice => !choice!.pinyin || !choice!.meaning)
+  showLesson(user, context, choicesRow, status)
+  const annotationsPending = !context.current.pinyin || !context.current.meaning || choices.some(choice => !choice!.pinyin || !choice!.meaning)
   if (annotationsPending) setTimeout(() => {
     if (lessonView === view) void renderLesson(user, state).catch(showError)
   }, 1500)
@@ -276,37 +296,30 @@ async function renderLesson(user: User, state: LessonState): Promise<void> {
 
 async function renderLoadingOptions(user: User, chainID: UUID): Promise<void> {
   const view = ++lessonView
-  const chain = await readChain(chainID)
-  const currentChain = chain.at(-1)
-  if (!currentChain) throw new Error("Backend returned an empty chain")
-  const symbols = await Promise.all(chain.map(item => client.tables.Symbol.get(item.symbolID)))
-  if (symbols.some(symbol => !symbol)) throw new Error("Chain contains a missing symbol")
-
-  const sentence = div(style({
-    display: "flex", justifyContent: "center", margin: "2.2rem 0 4.8rem", color: ink,
-    fontFamily: "Songti SC, Noto Serif CJK SC, serif", fontSize: "clamp(4.5rem, 12vw, 9rem)", lineHeight: "1.05",
-  }))
-  symbols.forEach(symbol => sentence.append(character(symbol!.mandarin_character, symbol!.pinyin, symbol!.meaning)))
+  const context = await lessonContext(chainID)
+  if (context.ended) {
+    const next = button("Next sentence", style({
+      padding: ".9rem 1.4rem", border: "0", borderRadius: ".7rem",
+      color: "#171810", background: accent, fontWeight: "750", cursor: "pointer",
+    }))
+    const status = p("Sentence complete", style({ margin: "1.5rem 0", color: accent, fontSize: ".85rem" }))
+    next.onclick = async () => {
+      next.disabled = true
+      status.textContent = "Loading the next sentence…"
+      try {
+        const state = await client.funcs.requestState({ user: user.id })
+        if (lessonView === view) await renderLesson(user, state)
+      } catch (error) { showError(error) }
+    }
+    showLesson(user, context, next, status)
+    return
+  }
   const placeholders = div(style({ display: "grid", gridTemplateColumns: "repeat(5, minmax(90px, 1fr))", gap: ".8rem", overflowX: "auto" }))
   for (let index = 0; index < 5; index++) placeholders.append(div(
     "…",
     style({ display: "grid", placeItems: "center", minHeight: "9rem", border: `1px solid ${line}`, borderRadius: "1rem", color: muted, background: surface, fontSize: "2rem" }),
   ))
-  const account = button(user.username, style({ padding: ".65rem 1rem", border: `1px solid ${line}`, borderRadius: "999px", color: muted, background: surface }))
-  account.onclick = renderProfiles
-  body.replaceChildren(div(
-    pageStyle,
-    div(style({ display: "flex", alignItems: "center", justifyContent: "space-between", width: "min(1120px, calc(100% - 3rem))", margin: "auto", padding: "2rem 0" }), brand(), account),
-    div(
-      style({ width: "min(1050px, calc(100% - 3rem))", margin: "7vh auto 0", textAlign: "center" }),
-      p("Continue the sentence", style({ margin: "0 0 2.8rem", color: accent, fontSize: ".75rem", fontWeight: "750", letterSpacing: ".18em", textTransform: "uppercase" })),
-      p(currentChain.completion === "complete" ? "Complete sentence" : "Incomplete prefix", style({ margin: "0 0 .7rem", color: muted, fontSize: ".72rem", letterSpacing: ".1em", textTransform: "uppercase" })),
-      p(currentChain.meaning, style({ margin: "0", color: ink, fontSize: "clamp(1rem, 2vw, 1.35rem)" })),
-      p(currentChain.pinyin, style({ margin: ".55rem 0 0", color: muted, fontSize: ".9rem", letterSpacing: ".08em" })),
-      sentence, placeholders,
-      p("Generating the next choices…", style({ margin: "1.5rem 0", color: muted, fontSize: ".85rem" })),
-    ),
-  ))
+  showLesson(user, context, placeholders, p("Generating the next choices…", style({ margin: "1.5rem 0", color: muted, fontSize: ".85rem" })))
 
   const next = await client.funcs.requestState({ user: user.id })
   if (lessonView === view) await renderLesson(user, next)

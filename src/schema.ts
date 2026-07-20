@@ -1,6 +1,3 @@
-import { validateJsonSchema } from "./jsonschema"
-
-
 export type JSONSchema = { [key: string]: JsonData }
 
 
@@ -10,30 +7,50 @@ export type Schema<T> = { json: JSONSchema }
 
 export type Infer<S> = S extends Schema<infer T> ? T : never
 
-export const validate = <T> (schema: Schema<T>, data:unknown) : T => {
-  return validateJsonSchema<T>(schema.json, data)
+function check(schema: JSONSchema, value: unknown, path = "$"): void {
+  const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value
+  const fail = (message: string): never => { throw new Error(`Validation error at ${path}: ${message}`) }
+
+  if ("const" in schema && !Object.is(value, schema.const)) fail(`expected constant ${JSON.stringify(schema.const)}`)
+  if (Array.isArray(schema.anyOf)) {
+    let firstError: unknown
+    for (const option of schema.anyOf) {
+      try { check(option as JSONSchema, value, path); return }
+      catch (error) { firstError ??= error }
+    }
+    throw firstError ?? new Error(`Validation error at ${path}: did not match any allowed schema`)
+  }
+
+  if (schema.type === "string") {
+    if (type !== "string") fail(`expected string, got ${type}`)
+    if (schema.format === "uuid" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value as string)) fail("expected UUID")
+  } else if (schema.type === "number") {
+    if (type !== "number" || Number.isNaN(value)) fail(`expected number, got ${type}`)
+  } else if (schema.type === "boolean") {
+    if (type !== "boolean") fail(`expected boolean, got ${type}`)
+  } else if (schema.type === "null") {
+    if (value !== null) fail(`expected null, got ${type}`)
+  } else if (schema.type === "array") {
+    if (!Array.isArray(value)) fail(`expected array, got ${type}`)
+    if (schema.items) (value as unknown[]).forEach((item, index) => check(schema.items as JSONSchema, item, `${path}[${index}]`))
+  } else if (schema.type === "object") {
+    if (type !== "object") fail(`expected object, got ${type}`)
+    const record = value as Record<string, unknown>
+    const properties = (schema.properties ?? {}) as Record<string, JSONSchema>
+    for (const key of (schema.required ?? []) as string[]) {
+      if (!(key in record)) throw new Error(`Validation error at ${path}.${key}: is required`)
+    }
+    for (const [key, property] of Object.entries(properties)) if (key in record) check(property, record[key], `${path}.${key}`)
+    if (schema.additionalProperties === false) {
+      const extra = Object.keys(record).find(key => !(key in properties))
+      if (extra) throw new Error(`Validation error at ${path}.${extra}: additional properties are not allowed`)
+    }
+  } else if (schema.type !== undefined) fail(`unsupported schema type ${JSON.stringify(schema.type)}`)
 }
 
-export const stringify = (data: JsonData): string => JSON.stringify(data, null, 2)
-
-
-export const fillSchema = <T>(schema: Schema<T>) : T =>{
-  let json = schema.json
-  if (json.type == "string") return "" as T
-  if (json.type == "number") return 0 as T
-  if (json.type == "boolean") return false as T
-  if (json.type == "null") return null as T
-  if (json.type == "array") return [] as T
-  if (json.type == "object" && json.properties){
-    const result: any = {}
-    let required = Array.isArray(json.required) ? json.required as string[] : []
-    for (let req of required)
-      result[req] = fillSchema({json: (json.properties as any)[req]})
-    return result
-  }
-  if ("const" in json) return json.const as T
-  if ("anyOf" in json && Array.isArray(json.anyOf)) return fillSchema({json: json.anyOf[0] as JSONSchema}) as T
-  return null as T
+export const validate = <T>(schema: Schema<T>, data: unknown): T => {
+  check(schema.json, data)
+  return data as T
 }
 
 export const fromJsonSchema = <T> (json: JSONSchema): Schema<T> => ({json})
@@ -41,9 +58,6 @@ export const fromJsonSchema = <T> (json: JSONSchema): Schema<T> => ({json})
 export const string: Schema<string> = fromJsonSchema({type: "string"})
 export const number: Schema<number> = fromJsonSchema({type: "number"})
 export const boolean: Schema<boolean> = fromJsonSchema({type: "boolean"})
-export const nullSchema : Schema<null> = fromJsonSchema({type: "null"})
-export const any: Schema<any> = fromJsonSchema({})
-export const optional = <T>(schema: Schema<T>) : Schema<T | null> => fromJsonSchema({anyOf: [{type: "null"}, schema.json]})
 export const array = <T>(itemSchema: Schema<T>): Schema<T[]> => fromJsonSchema({type: "array", items: itemSchema.json})
 export const constant = <T extends string | number | boolean>(value: T): Schema<T> => fromJsonSchema({const: value})
 
@@ -57,26 +71,7 @@ export const object = <S extends Record<string, Schema<any>>> (
   ...(options.additionalProperties === undefined ? {} : { additionalProperties: options.additionalProperties }),
 })
 
-export const record = <T>(valueSchema: Schema<T>): Schema<Record<string, T>> => fromJsonSchema({type: "object", additionalProperties: valueSchema.json})
-export const schemaSchema : Schema<JSONSchema> = record(any)
-
 export const union = <S extends Schema<any>[]>(...schemas: S): Schema<Infer<S[number]>> => fromJsonSchema({anyOf: schemas.map(s=> s.json)})
-export const intersection = <S extends Schema<any>[]>(...schemas: S): Schema<Infer<S[number]>> => fromJsonSchema({allOf: schemas.map(s=> s.json)})
-
-export const asTypeView = (schema: Schema<any>): string => {
-  if (schema.json.type == "string") return "string"
-  if (schema.json.type == "number") return "number"
-  if (schema.json.type == "boolean") return "boolean"
-  if (schema.json.type == "null") return "null"
-  if (schema.json.type == "array" && schema.json.items) return `${asTypeView({json: schema.json.items as JSONSchema})}[]`
-  if (schema.json.type == "object" && schema.json.properties){
-    let props = Object.entries(schema.json.properties).map(([key, prop])=> `${key}: ${asTypeView({json: prop as JSONSchema})}`)
-    return `{\n  ${props.join(",\n").replaceAll("\n", "\n  ")}\n}`
-  }
-  if ("const" in schema.json) return JSON.stringify(schema.json.const)
-  if ("anyOf" in schema.json && Array.isArray(schema.json.anyOf)) return schema.json.anyOf.map(s=> asTypeView({json: s as JSONSchema})).join(" | ")
-  return "any"
-}
 
 
 export type Writable <T extends JsonData> = {
