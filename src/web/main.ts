@@ -419,7 +419,7 @@ async function choiceHistory(user: User, currentChain: UUID | null): Promise<HTM
     Object.assign(svg.style, { position: "absolute", inset: "0", zIndex: "-1", width: "100%", height: "100%", overflow: "visible", pointerEvents: "none" })
     path.setAttribute("fill", "none")
     path.setAttribute("stroke", color.green)
-    path.setAttribute("stroke-width", "4")
+    path.setAttribute("stroke-width", "8")
     path.setAttribute("stroke-linecap", "round")
     path.setAttribute("opacity", ".45")
     svg.append(path)
@@ -427,7 +427,7 @@ async function choiceHistory(user: User, currentChain: UUID | null): Promise<HTM
       const curl = document.createElementNS("http://www.w3.org/2000/svg", "path")
       curl.setAttribute("fill", "none")
       curl.setAttribute("stroke", color.green)
-      curl.setAttribute("stroke-width", "3.5")
+      curl.setAttribute("stroke-width", "7")
       curl.setAttribute("stroke-linecap", "round")
       curl.setAttribute("opacity", ".55")
       svg.append(curl)
@@ -447,7 +447,7 @@ async function choiceHistory(user: User, currentChain: UUID | null): Promise<HTM
       const route = points.slice(1).map((lower, index) => {
         const upper = points[index]!
         const middle = (upper.bottom + lower.top) / 2
-        return `M ${upper.x} ${upper.bottom} C ${upper.x} ${middle}, ${lower.x} ${middle}, ${lower.x} ${lower.top}`
+        return `M ${upper.x} ${upper.bottom} C ${upper.x} ${middle + 30}, ${lower.x} ${middle- 30}, ${lower.x} ${lower.top}`
       }).join(" ")
       svg.setAttribute("viewBox", `0 0 ${bounds.width} ${bounds.height}`)
       path.setAttribute("d", route)
@@ -458,7 +458,13 @@ async function choiceHistory(user: User, currentChain: UUID | null): Promise<HTM
         const y = cardBounds.top - bounds.top + cardBounds.height / 2
         curl.setAttribute(
           "d",
-          `M ${x} ${y} C ${x + direction * 10} ${y}, ${x + direction * 18} ${y - 6}, ${x + direction * 18} ${y - 14} C ${x + direction * 18} ${y - 24}, ${x + direction * 4} ${y - 24}, ${x + direction * 4} ${y - 14} C ${x + direction * 4} ${y - 7}, ${x + direction * 12} ${y - 7}, ${x + direction * 12} ${y - 13}`,
+          `M ${x -(direction* 5)} ${y}
+          C ${x } ${y-20}, ${x + direction * 25} ${y-20}, ${x + direction * 30} ${y-20 }
+          C ${x + direction * 60} ${y-20 }, ${x + direction * 60} ${y+20}, ${x + direction * 30} ${y + 20 }
+          C  ${x + direction * 15} ${y + 20 }, ${x + direction * 15} ${y }, ${x + direction * 30} ${y }
+
+
+          `,
         )
       })
     }
@@ -499,7 +505,7 @@ function showChoiceTrail(history: HTMLElement, choice: HTMLElement): void {
   })
   path.setAttribute("fill", "none")
   path.setAttribute("stroke", color.green)
-  path.setAttribute("stroke-width", "4")
+  path.setAttribute("stroke-width", "8")
   path.setAttribute("stroke-linecap", "round")
   path.setAttribute("opacity", ".45")
   svg.append(path)
@@ -512,7 +518,7 @@ function showChoiceTrail(history: HTMLElement, choice: HTMLElement): void {
     const start = { x: lower.left - bounds.left + lower.width / 2, y: lower.top - bounds.top }
     const end = { x: upper.left - bounds.left + upper.width / 2, y: upper.bottom - bounds.top }
     const middle = (start.y + end.y) / 2
-    path.setAttribute("d", `M ${start.x} ${start.y} C ${start.x} ${middle}, ${end.x} ${middle}, ${end.x} ${end.y}`)
+    path.setAttribute("d", `M ${start.x} ${start.y} C ${start.x} ${middle + 0}, ${end.x} ${middle - 20}, ${end.x} ${end.y}`)
   }
   draw()
   activeChoiceTrailResize = new ResizeObserver(draw)
@@ -528,9 +534,15 @@ function showLesson(
 ): void {
   const flow = div(choices, status, history, style({ position: "relative" }))
   flow.setAttribute("data-lesson-flow", "")
+  const sentenceLength = Math.max(1, context.symbols.length)
+  const sentenceViewportSize = Math.max(5, Math.min(12, 72 / sentenceLength))
+  const sentenceMaximumSize = Math.max(4, 9 - Math.max(0, sentenceLength - 4) * .45)
   const sentence = div(style({
-    display: "flex", justifyContent: "center", margin: "2.2rem 0 4.8rem", color: ink,
-    fontFamily: "Songti SC, Noto Serif CJK SC, serif", fontSize: "clamp(4.5rem, 12vw, 9rem)", lineHeight: "1.05",
+    display: "flex", flexWrap: "wrap", justifyContent: "center", alignContent: "center",
+    maxWidth: "14em", margin: "2.2rem auto 4.8rem", color: ink,
+    fontFamily: "Songti SC, Noto Serif CJK SC, serif",
+    fontSize: `clamp(2.75rem, ${sentenceViewportSize}vw, ${sentenceMaximumSize}rem)`,
+    lineHeight: "1.05", rowGap: ".08em",
   }))
   context.symbols.forEach(symbol => sentence.append(character(symbol.mandarin_character, symbol.pinyin, symbol.meaning)))
   const account = button(user.username, style({ padding: ".65rem 1rem", border: `1px solid ${line}`, borderRadius: "999px", color: muted, background: surface }))
