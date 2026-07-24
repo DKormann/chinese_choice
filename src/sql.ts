@@ -42,6 +42,10 @@ export type InsertRow<C extends Columns> = Partial<Row<C>>
 
 export type ReferentialAction = "cascade" | "restrict" | "set null" | "set default" | "no action"
 export type Access = "public" | "private"
+type UniqueIndex<C extends Columns> = {
+  columns: readonly (keyof C)[]
+  whereNull?: keyof C
+}
 type Reference = {
   target: Table<any, any, any> | "self"
   onDelete?: ReferentialAction
@@ -56,6 +60,7 @@ export type Table<
   access: A
   columns: C
   indexes: I
+  uniqueIndexes: readonly UniqueIndex<C>[]
 }
 
 type ColumnsWithId<C extends Record<string, Schema<any>>> = { readonly id: typeof UUID } & C
@@ -66,12 +71,17 @@ export function table<
   const A extends Access = "public",
 >(
   columns: C extends { id: unknown } ? never : C,
-  options: { access?: A; indexes?: I } = {},
+  options: {
+    access?: A
+    indexes?: I
+    uniqueIndexes?: readonly UniqueIndex<ColumnsWithId<C>>[]
+  } = {},
 ): Table<ColumnsWithId<C>, I, A> {
   return {
     access: options.access ?? "public" as A,
     columns: { id: UUID, ...columns },
     indexes: options.indexes ?? [] as unknown as I,
+    uniqueIndexes: options.uniqueIndexes ?? [],
   }
 }
 
@@ -166,6 +176,15 @@ export function createDB<const T extends Tables>(tables: T, sqlite: Database) {
       assertIdentifier(String(index))
       sqlite.exec(`CREATE INDEX IF NOT EXISTS ${tableName}_${String(index)}_idx ON ${tableName} (${String(index)})`)
     }
+    for (const index of definition.uniqueIndexes) {
+      for (const column of index.columns) assertIdentifier(String(column))
+      if (index.whereNull) assertIdentifier(String(index.whereNull))
+      const columns = index.columns.map(String)
+      const suffix = index.whereNull ? `_where_${String(index.whereNull)}_null` : ""
+      const name = `${tableName}_${columns.join("_")}${suffix}_unique_idx`
+      const where = index.whereNull ? ` WHERE ${String(index.whereNull)} IS NULL` : ""
+      sqlite.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${name} ON ${tableName} (${columns.join(", ")})${where}`)
+    }
   }
 
   function definition<K extends keyof T>(tableName: K): T[K] {
@@ -221,8 +240,11 @@ export function createDB<const T extends Tables>(tables: T, sqlite: Database) {
       const schema = current.columns[column as string]
       if (!schema) throw new Error(`Unknown column: ${String(column)}`)
       assertIdentifier(String(column))
-      const rows = sqlite.query(`SELECT * FROM ${String(tableName)} WHERE ${String(column)} = ?`)
-        .all(encodeValue(schema, value)) as Record<string, unknown>[]
+      const encoded = encodeValue(schema, value)
+      const rows = (encoded === null
+        ? sqlite.query(`SELECT * FROM ${String(tableName)} WHERE ${String(column)} IS NULL`).all()
+        : sqlite.query(`SELECT * FROM ${String(tableName)} WHERE ${String(column)} = ?`).all(encoded)
+      ) as Record<string, unknown>[]
       return rows.map(row => decodeRow(current.columns, row)) as TableRow<T[K]>[]
     },
 

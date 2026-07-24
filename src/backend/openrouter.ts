@@ -20,6 +20,19 @@ type ChatResponse = {
 }
 
 const endpoint = "https://openrouter.ai/api/v1/chat/completions"
+const speechEndpoint = "https://openrouter.ai/api/v1/audio/speech"
+
+function speechSettings() {
+  return {
+    model: process.env.OPENROUTER_TTS_MODEL ?? "qwen/qwen-audio-3.0-tts-plus",
+    voice: process.env.OPENROUTER_TTS_VOICE ?? "longanlingxin",
+  }
+}
+
+export function openRouterSpeechKey(input: string): string {
+  const { model, voice } = speechSettings()
+  return JSON.stringify({ model, voice, input })
+}
 
 export class OpenRouterContentError extends Error {}
 export class OpenRouterRequestError extends Error {
@@ -131,4 +144,43 @@ export async function openRouterJson<T>(schema: Schema<T>, messages: Message[], 
     })
     throw new OpenRouterContentError(`OpenRouter returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+export async function openRouterSpeech(input: string): Promise<Uint8Array> {
+  const apiKey = process.env.OPENROUTER_API_KEY
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured")
+  const timeout = Number(process.env.OPENROUTER_TIMEOUT_MS ?? 30_000)
+  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("OPENROUTER_TIMEOUT_MS must be a positive number")
+  const { model, voice } = speechSettings()
+  const requestId = crypto.randomUUID()
+  const startedAt = performance.now()
+  llmLog(requestId, "request", { task: "speech", model, voice, input })
+
+  let response: Response
+  try {
+    response = await fetch(speechEndpoint, {
+      method: "POST",
+      signal: AbortSignal.timeout(timeout),
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "X-OpenRouter-Title": "Chinese Choice",
+      },
+      body: JSON.stringify({ model, voice, input, response_format: "mp3" }),
+    })
+  } catch (error) {
+    llmLog(requestId, "network_error", { task: "speech", model, durationMs: Math.round(performance.now() - startedAt), error: error instanceof Error ? error.message : String(error) })
+    if (error instanceof DOMException && error.name === "TimeoutError") throw new OpenRouterRequestError(`OpenRouter did not respond within ${Math.round(timeout / 1000)} seconds`, 408, true)
+    throw new OpenRouterRequestError(`OpenRouter network error: ${error instanceof Error ? error.message : String(error)}`, 0, true)
+  }
+
+  if (!response.ok) {
+    const error = await response.text()
+    llmLog(requestId, "response", { task: "speech", model, status: response.status, durationMs: Math.round(performance.now() - startedAt), error })
+    throw new OpenRouterRequestError(`OpenRouter speech request failed: ${error || response.statusText}`, response.status, response.status === 408 || response.status === 429 || response.status >= 500)
+  }
+  const audio = new Uint8Array(await response.arrayBuffer())
+  llmLog(requestId, "response", { task: "speech", model, status: response.status, durationMs: Math.round(performance.now() - startedAt), bytes: audio.byteLength })
+  if (!audio.byteLength) throw new OpenRouterContentError("OpenRouter returned empty speech audio")
+  return audio
 }

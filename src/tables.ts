@@ -1,4 +1,4 @@
-import { OpenRouterContentError, openRouterJson } from "./backend/openrouter"
+import { OpenRouterContentError, openRouterJson, openRouterSpeech, openRouterSpeechKey } from "./backend/openrouter"
 import { createDB, randomUUID, ref, selfRef, table, UUID, type TableRow } from "./sql"
 import { array, constant, number, object, string, union, type Infer } from "./schema"
 import { serverFunction } from "./typedFunction"
@@ -10,14 +10,20 @@ export const Symbol = table({
   mandarin_character: string,
   pinyin: string,
   meaning: string,
-})
+}, { uniqueIndexes: [{ columns: ["mandarin_character"] }] })
 
 export const Chain = table({
   prev: selfRef({ nullable: true, onDelete: "set null" }),
   symbolID: ref(Symbol, { onDelete: "cascade" }),
   pinyin: string,
   meaning: string,
-}, { indexes: ["prev", "symbolID"] })
+}, {
+  indexes: ["prev", "symbolID"],
+  uniqueIndexes: [
+    { columns: ["prev", "symbolID"] },
+    { columns: ["symbolID"], whereNull: "prev" },
+  ],
+})
 
 export const User = table({ username: string }, { access: "private" })
 
@@ -28,32 +34,39 @@ export const UserState = table({
 
 export const UserStateOption = table({
   user: ref(User, { onDelete: "cascade" }),
+  chain: ref(Chain, { nullable: true, onDelete: "cascade" }),
   symbol: ref(Symbol, { onDelete: "cascade" }),
   outcome: outcomeSchema,
   position: number,
   nextChain: ref(Chain, { nullable: true, onDelete: "cascade" }),
-}, { access: "private", indexes: ["user", "symbol"] })
+}, { access: "private", indexes: ["user", "chain", "symbol"] })
 
 export const Attempt = table({
   user: ref(User, { onDelete: "cascade" }),
-  chain: ref(Chain, { onDelete: "cascade" }),
+  chain: ref(Chain, { nullable: true, onDelete: "cascade" }),
   symbol: ref(Symbol, { onDelete: "cascade" }),
   outcome: outcomeSchema,
   createdAt: number,
 }, { access: "private", indexes: ["user", "chain", "symbol"] })
 
-export const tables = { User, Symbol, Chain, UserState, UserStateOption, Attempt }
+export const Speech = table({
+  key: string,
+  audio: string,
+}, { access: "private", indexes: ["key"] })
+
+export const tables = { User, Symbol, Chain, UserState, UserStateOption, Attempt, Speech }
 
 export const UserRow = object(User.columns)
 type ChainData = TableRow<typeof Chain>
 
 type DB = ReturnType<typeof createDB<typeof tables>>
-type LessonState = { chain: UUID; options: UUID[] }
+type LessonState = { chain: UUID | null; options: UUID[]; known: UUID[] }
 
 const sentenceResponse = object({ sentence: string, pinyin: string, translation: string })
 const ratingResponse = object({ ratings: array(object({ character: string, outcome: ratingOutcomeSchema })) })
 const symbolAnnotation = object({ pinyin: string, fixed_translation: string })
 const chainAnnotation = object({ pinyin: string, translation_or_description: string })
+const sentenceHelpResponse = object({ answer: string })
 type GeneratedSentence = Infer<typeof sentenceResponse>
 
 function characters(value: string): string[] {
@@ -82,6 +95,39 @@ function chainRows(db: DB, id: UUID): ChainData[] {
 
 function chainText(db: DB, id: UUID): string {
   return chainRows(db, id).map(row => db.forceGet("Symbol", row.symbolID).mandarin_character).join("")
+}
+
+async function answerSentenceQuestion(db: DB, user: UUID, chain: UUID, question: string): Promise<string> {
+  if (activeChain(db, user) !== chain) throw new Error("This is no longer the current sentence")
+  const trimmed = question.trim()
+  if (!trimmed) throw new Error("Ask a question about the current sentence")
+  if (trimmed.length > 500) throw new Error("Questions must be 500 characters or fewer")
+  const current = db.forceGet("Chain", chain)
+  const text = chainText(db, chain)
+  const result = await openRouterJson(sentenceHelpResponse, [{
+    role: "user",
+    content: `You are a concise Chinese-learning helper. Answer the learner's question only about the current visible Chinese text. It may be an incomplete prefix, so do not invent or reveal later continuation characters, recommend an answer choice, or introduce a different sentence. Explain vocabulary, grammar, meaning, pinyin, or ambiguity in this text when relevant. If the question is outside this text, say that you can only help with the current sentence.\n\nCurrent text: ${JSON.stringify(text)}\nPinyin: ${JSON.stringify(current.pinyin)}\nEnglish annotation: ${JSON.stringify(current.meaning)}\nLearner question: ${JSON.stringify(trimmed)}`,
+  }])
+  const answer = result.answer.trim()
+  if (!answer) throw new OpenRouterContentError("Sentence helper returned an empty answer")
+  return answer
+}
+
+function base64(bytes: Uint8Array): string {
+  let binary = ""
+  for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000))
+  return btoa(binary)
+}
+
+async function speakCurrentSentence(db: DB, user: UUID, chain: UUID): Promise<string> {
+  if (activeChain(db, user) !== chain) throw new Error("This is no longer the current sentence")
+  const text = chainText(db, chain)
+  const key = openRouterSpeechKey(text)
+  const cached = db.where("Speech", "key", key)[0]
+  if (cached) return cached.audio
+  const audio = base64(await openRouterSpeech(text))
+  db.insert("Speech", { id: randomUUID(), key, audio })
+  return audio
 }
 
 async function generateSentence(prefix = ""): Promise<GeneratedSentence> {
@@ -159,10 +205,10 @@ function isDot(db: DB, chain: { symbolID: UUID }): boolean {
   return db.forceGet("Symbol", chain.symbolID).mandarin_character === "。"
 }
 
-async function ensureChildren(db: DB, chain: UUID) {
+async function ensureChildren(db: DB, chain: UUID | null) {
   let children = db.where("Chain", "prev", chain)
   const sentencesToGenerate = Math.max(0, 2 - children.length)
-  const prefix = chainText(db, chain)
+  const prefix = chain ? chainText(db, chain) : ""
   const generated = await Promise.all(Array.from({ length: sentencesToGenerate }, () => generateSentence(prefix)))
   for (const sentence of generated) appendSentence(db, sentence, chain)
   children = db.where("Chain", "prev", chain)
@@ -215,12 +261,12 @@ function sampleSymbols(db: DB, excluded: Set<UUID>, count: number): UUID[] {
 
 type OptionRow = TableRow<typeof UserStateOption>
 
-async function createOptions(db: DB, user: UUID, chain: UUID): Promise<UUID[]> {
+async function createOptions(db: DB, user: UUID, chain: UUID | null): Promise<UUID[]> {
   const children = await ensureChildren(db, chain)
   const correct = children.map(child => ({ symbol: child.symbolID, outcome: "correct" as const, nextChain: child.id }))
   const randomSymbols = sampleSymbols(db, new Set(correct.map(option => option.symbol)), 5 - correct.length)
-  const ratings = await rateCandidates(chainText(db, chain), randomSymbols.map(id => db.forceGet("Symbol", id).mandarin_character))
-  const rows: Omit<OptionRow, "id" | "user" | "position">[] = [
+  const ratings = await rateCandidates(chain ? chainText(db, chain) : "", randomSymbols.map(id => db.forceGet("Symbol", id).mandarin_character))
+  const rows: Omit<OptionRow, "id" | "user" | "chain" | "position">[] = [
     ...correct,
     ...randomSymbols.map((symbol, index) => ({
       symbol,
@@ -235,13 +281,15 @@ async function createOptions(db: DB, user: UUID, chain: UUID): Promise<UUID[]> {
 
   await Promise.all([
     ...[...new Set(rows.map(row => row.symbol))].map(id => annotateSymbol(db, id)),
-    annotateChain(db, chain),
+    ...(chain ? [annotateChain(db, chain)] : []),
     ...children.map(child => annotateChain(db, child.id)),
   ])
 
-  const stored: OptionRow[] = rows.map((row, position) => ({ id: randomUUID(), user, position, ...row }))
+  const stored: OptionRow[] = rows.map((row, position) => ({ id: randomUUID(), user, chain, position, ...row }))
   db.transaction(() => {
-    for (const old of db.where("UserStateOption", "user", user)) db.delete("UserStateOption", old.id)
+    for (const old of db.where("UserStateOption", "user", user).filter(option => option.chain === chain)) {
+      db.delete("UserStateOption", old.id)
+    }
     for (const row of stored) db.insert("UserStateOption", row)
   })
   return stored.map(row => row.symbol)
@@ -251,23 +299,58 @@ function activeChain(db: DB, user: UUID): UUID | null {
   return db.where("UserState", "user", user)[0]?.currentChain ?? null
 }
 
-function currentState(db: DB, user: UUID): LessonState | null {
-  const chain = activeChain(db, user)
-  if (!chain) return null
-  const options = db.where("UserStateOption", "user", user).sort((a, b) => a.position - b.position)
-  const symbols = options.map(option => option.symbol)
-  return options.length === 5 && new Set(symbols).size === 5 ? { chain, options: symbols } : null
+function lessonState(db: DB, user: UUID, chain: UUID | null, options: UUID[]): LessonState {
+  const correct = new Set(db.where("Attempt", "user", user)
+    .filter(attempt => attempt.outcome === "correct")
+    .map(attempt => attempt.symbol))
+  return { chain, options, known: options.filter(option => correct.has(option)) }
 }
 
-function setState(db: DB, user: UUID, chain: UUID): void {
+function currentState(db: DB, user: UUID): LessonState | null {
+  const userState = db.where("UserState", "user", user)[0]
+  if (!userState) return null
+  const chain = userState.currentChain
+  const options = db.where("UserStateOption", "user", user)
+    .filter(option => option.chain === chain)
+    .sort((a, b) => a.position - b.position)
+  const symbols = options.map(option => option.symbol)
+  return options.length === 5 && new Set(symbols).size === 5 ? lessonState(db, user, chain, symbols) : null
+}
+
+function setState(db: DB, user: UUID, chain: UUID | null): void {
   const existing = db.where("UserState", "user", user)[0]
   db.set("UserState", { id: existing?.id ?? randomUUID(), user, currentChain: chain })
 }
 
+function lessonHistory(db: DB, user: UUID) {
+  const chain = activeChain(db, user)
+  if (!chain) return { steps: [] }
+  const options = db.where("UserStateOption", "user", user)
+  const byChain = new Map<UUID | null, OptionRow[]>()
+  for (const option of options) byChain.set(option.chain, [...byChain.get(option.chain) ?? [], option])
+  const path = chainRows(db, chain)
+  const steps = path.flatMap((taken, index) => {
+    const previous = path[index - 1]?.id ?? null
+    const choices = (byChain.get(previous) ?? []).sort((a, b) => a.position - b.position)
+    if (choices.length === 5 && new Set(choices.map(choice => choice.symbol)).size === 5) {
+      return [{
+        chain: previous,
+        options: choices.map(choice => ({
+          symbol: choice.symbol,
+          outcome: choice.outcome,
+          taken: choice.symbol === taken.symbolID,
+        })),
+      }]
+    }
+    return []
+  })
+  return { steps: steps.reverse() }
+}
+
 async function newLesson(db: DB, user: UUID): Promise<LessonState> {
-  const chain = appendSentence(db, await generateSentence())
-  setState(db, user, chain)
-  return { chain, options: await createOptions(db, user, chain) }
+  appendSentence(db, await generateSentence())
+  setState(db, user, null)
+  return lessonState(db, user, null, await createOptions(db, user, null))
 }
 
 const stateRequests = new WeakMap<DB, Map<UUID, Promise<LessonState>>>()
@@ -280,9 +363,10 @@ function requestState(db: DB, user: UUID): Promise<LessonState> {
   const request = (async () => {
     const existing = currentState(db, user)
     if (existing) return existing
-    const chain = activeChain(db, user)
-    if (!chain || isDot(db, db.forceGet("Chain", chain))) return newLesson(db, user)
-    return { chain, options: await createOptions(db, user, chain) }
+    const userState = db.where("UserState", "user", user)[0]
+    if (!userState || (userState.currentChain && isDot(db, db.forceGet("Chain", userState.currentChain)))) return newLesson(db, user)
+    const chain = userState.currentChain
+    return lessonState(db, user, chain, await createOptions(db, user, chain))
   })().finally(() => requests.delete(user))
   requests.set(user, request)
   return request
@@ -306,17 +390,35 @@ export const functions = {
     (db, { user, option }) => {
       const state = currentState(db, user)
       if (!state) throw new Error("User has no active options")
-      const selected = db.where("UserStateOption", "user", user).find(row => row.symbol === option)
+      const selected = db.where("UserStateOption", "user", user)
+        .find(row => row.chain === state.chain && row.symbol === option)
       if (!selected) throw new Error("Invalid active option")
       const outcome = selected.outcome
       db.insert("Attempt", { id: randomUUID(), user, chain: state.chain, symbol: option, outcome, createdAt: Date.now() })
       if (outcome !== "correct") return { outcome, nextChain: null }
       if (!selected.nextChain) throw new Error("Correct option has no child chain")
       setState(db, user, selected.nextChain)
-      for (const old of db.where("UserStateOption", "user", user)) db.delete("UserStateOption", old.id)
       return { outcome, nextChain: selected.nextChain }
     },
     "Advance to a valid child immediately; options load separately.",
+  ),
+
+  askSentence: serverFunction(
+    { user: ref(User), chain: ref(Chain), question: string },
+    async (db, { user, chain, question }) => ({ answer: await answerSentenceQuestion(db, user, chain, question) }),
+    "Answer a question using only the learner's current visible sentence.",
+  ),
+
+  speakSentence: serverFunction(
+    { user: ref(User), chain: ref(Chain) },
+    async (db, { user, chain }) => ({ audio: await speakCurrentSentence(db, user, chain) }),
+    "Generate Mandarin speech for the learner's current visible sentence.",
+  ),
+
+  lessonHistory: serverFunction(
+    { user: ref(User) },
+    (db, { user }) => lessonHistory(db, user),
+    "Return completed five-choice steps in chronological order.",
   ),
 }
 

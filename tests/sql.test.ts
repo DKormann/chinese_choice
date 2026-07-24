@@ -55,6 +55,11 @@ describe("SQL database", () => {
     db.set("Chain", { id: firstId, prev: null, symbolID: symbolId, pinyin: "nǐ", meaning: "you" })
     db.set("Chain", { id: secondId, prev: firstId, symbolID: symbolId, pinyin: "hǎo", meaning: "good" })
 
+    expect(db.where("Chain", "prev", null).map(row => row.id)).toEqual([firstId])
+    expect(() => db.set("Symbol", { id: id("23"), mandarin_character: "你", pinyin: "nǐ", meaning: "you" })).toThrow()
+    expect(() => db.set("Chain", { id: id("24"), prev: null, symbolID: symbolId, pinyin: "", meaning: "" })).toThrow()
+    expect(() => db.set("Chain", { id: id("25"), prev: firstId, symbolID: symbolId, pinyin: "", meaning: "" })).toThrow()
+
     db.set("Symbol", { id: symbolId, mandarin_character: "你", pinyin: "nǐ", meaning: "you (updated)" })
     expect(db.forceGet("Symbol", symbolId).meaning).toBe("you (updated)")
     expect(db.forceGet("Chain", firstId).symbolID).toBe(symbolId)

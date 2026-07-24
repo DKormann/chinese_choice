@@ -6,6 +6,7 @@ import { appName, dataDirectoryEnvironmentVariable } from "../config"
 import { createDB } from "../sql"
 import { object, validate } from "../schema"
 import { functions, tables } from "../tables"
+import { migrateDatabase } from "./migrate"
 
 function defaultDataDirectory(): string {
   if (process.platform === "win32") return join(process.env.LOCALAPPDATA ?? homedir(), appName)
@@ -19,6 +20,7 @@ mkdirSync(dataDirectory, { recursive: true })
 export const databasePath = join(dataDirectory, "app.db")
 export const sqlite = new Database(databasePath, { create: true })
 sqlite.exec("PRAGMA journal_mode = WAL")
+migrateDatabase(sqlite)
 export const db = createDB(tables, sqlite)
 
 function json(data: unknown, status = 200): Response {
